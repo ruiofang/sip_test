@@ -11,7 +11,7 @@ VoIP客户端交互式启动脚本 (无虚拟环境版本)
 - 配置管理
 - 帮助文档
 
-作者: GitHub Copilot
+作者: RUIO
 日期: 2025年8月21日
 """
 
@@ -104,7 +104,7 @@ class VoIPClientLauncher:
         print("🎙️  VoIP云端语音通话系统 - 客户端启动器")
         print("=" * 60)
         print("📞 支持语音通话、文本消息、多用户连接")
-        print("🔧 版本: v1.2.0 | 作者: GitHub Copilot")
+        print("🔧 版本: v1.2.0 | 作者: RUIO")
         print("=" * 60)
     
     def print_menu(self):
