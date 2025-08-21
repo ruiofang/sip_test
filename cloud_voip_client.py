@@ -35,6 +35,10 @@ from typing import Dict, Any, Optional, List
 os.environ['ALSA_PCM_CARD'] = '0'
 os.environ['ALSA_PCM_DEVICE'] = '0'
 
+# 抑制numpy运行时警告
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in divide")
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="divide by zero encountered")
+
 try:
     import pyaudio
     AUDIO_AVAILABLE = True
@@ -42,6 +46,21 @@ try:
 except ImportError:
     AUDIO_AVAILABLE = False
     print("警告: pyaudio未安装，语音功能将不可用")
+
+
+def get_config_path(filename):
+    """
+    获取配置文件的正确路径
+    兼容PyInstaller打包后的环境
+    """
+    if getattr(sys, 'frozen', False):
+        # 如果是PyInstaller打包的可执行文件
+        base_path = os.path.dirname(sys.executable)
+    else:
+        # 如果是普通Python脚本
+        base_path = os.path.dirname(__file__)
+    
+    return os.path.join(base_path, filename)
 
 
 class CloudVoIPClient:
@@ -108,9 +127,20 @@ class CloudVoIPClient:
         
         # 音频缓冲和历史数据
         self.audio_history = []              # 输出音频历史，用于回声消除
-        self.history_size = 10               # 保留历史帧数
+        self.history_size = 5                # 保留历史帧数（减少到5帧）
         self.silence_counter = 0             # 静音计数器
         self.silence_threshold = 50          # 静音阈值（连续静音帧数）
+        
+        # 改进的回声消除参数
+        self.echo_threshold = 0.6            # 回声检测阈值（提高阈值）
+        self.echo_suppression_factor = 0.7   # 回声抑制因子（降低抑制强度）
+        self.echo_learning_rate = 0.1        # 自适应学习率
+        self.min_suppression = 0.3           # 最小抑制量，避免完全静音
+        
+        # 语音增强参数
+        self.spectral_subtraction = False    # 谱减法降噪
+        self.adaptive_threshold = True       # 自适应阈值
+        self.echo_detection_window = 3       # 回声检测窗口（帧数）
         
         # 线程锁
         self.clients_lock = threading.Lock()
@@ -123,14 +153,14 @@ class CloudVoIPClient:
     def load_audio_config(self, config_file='audio_config.json'):
         """加载音频配置"""
         try:
-            config_path = os.path.join(os.path.dirname(__file__), config_file)
+            config_path = get_config_path(config_file)
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     
                 audio_settings = config.get('audio_settings', {})
                 
-                # 更新配置
+                # 更新基础配置
                 self.echo_cancellation = audio_settings.get('echo_cancellation', self.echo_cancellation)
                 self.noise_suppression = audio_settings.get('noise_suppression', self.noise_suppression)
                 self.auto_gain_control = audio_settings.get('auto_gain_control', self.auto_gain_control)
@@ -142,6 +172,16 @@ class CloudVoIPClient:
                 self.history_size = audio_settings.get('history_size', self.history_size)
                 self.silence_threshold = audio_settings.get('silence_threshold', self.silence_threshold)
                 
+                # 更新新的回声消除参数
+                self.echo_threshold = audio_settings.get('echo_threshold', getattr(self, 'echo_threshold', 0.6))
+                self.echo_suppression_factor = audio_settings.get('echo_suppression_factor', getattr(self, 'echo_suppression_factor', 0.7))
+                self.min_suppression = audio_settings.get('min_suppression', getattr(self, 'min_suppression', 0.3))
+                self.echo_learning_rate = audio_settings.get('echo_learning_rate', getattr(self, 'echo_learning_rate', 0.1))
+                self.spectral_subtraction = audio_settings.get('spectral_subtraction', getattr(self, 'spectral_subtraction', False))
+                self.adaptive_threshold = audio_settings.get('adaptive_threshold', getattr(self, 'adaptive_threshold', True))
+                self.echo_detection_window = audio_settings.get('echo_detection_window', getattr(self, 'echo_detection_window', 3))
+                self.debug_audio_processing = audio_settings.get('debug_audio_processing', False)
+                
                 # 高级设置
                 advanced_settings = config.get('advanced_settings', {})
                 if advanced_settings.get('chunk_size'):
@@ -150,11 +190,97 @@ class CloudVoIPClient:
                     self.rate = advanced_settings['sample_rate']
                 
                 print(f"✅ 已加载音频配置: {config_file}")
+                if self.debug_audio_processing:
+                    print("🐛 调试模式已启用")
             else:
-                print(f"⚠️ 音频配置文件不存在: {config_file}，使用默认配置")
+                print(f"⚠️ 音频配置文件不存在: {config_file}，正在创建默认配置...")
+                self._create_default_audio_config(config_path)
+                print(f"✅ 已创建默认音频配置文件: {config_file}")
                 
         except Exception as e:
             print(f"❌ 加载音频配置失败: {e}，使用默认配置")
+
+    def _create_default_audio_config(self, config_path):
+        """创建默认的音频配置文件"""
+        default_config = {
+            "audio_settings": {
+                "echo_cancellation": self.echo_cancellation,
+                "noise_suppression": self.noise_suppression,
+                "auto_gain_control": self.auto_gain_control,
+                "voice_activity_detection": self.voice_activity_detection,
+                "input_volume": self.input_volume,
+                "output_volume": self.output_volume,
+                "noise_gate_threshold": self.noise_gate_threshold,
+                "echo_delay_samples": self.echo_delay_samples,
+                "history_size": self.history_size,
+                "silence_threshold": self.silence_threshold,
+                "echo_threshold": getattr(self, 'echo_threshold', 0.6),
+                "echo_suppression_factor": getattr(self, 'echo_suppression_factor', 0.7),
+                "min_suppression": getattr(self, 'min_suppression', 0.3),
+                "echo_learning_rate": getattr(self, 'echo_learning_rate', 0.1),
+                "spectral_subtraction": getattr(self, 'spectral_subtraction', False),
+                "adaptive_threshold": getattr(self, 'adaptive_threshold', True),
+                "echo_detection_window": getattr(self, 'echo_detection_window', 3),
+                "debug_audio_processing": False
+            },
+            "advanced_settings": {
+                "chunk_size": self.chunk,
+                "sample_rate": self.rate,
+                "channels": self.channels,
+                "format": "paInt16",
+                "low_latency_mode": True,
+                "audio_buffer_size": 4096
+            },
+            "description": {
+                "echo_cancellation": "回声消除 - 智能检测并减少扬声器声音被麦克风捕获",
+                "noise_suppression": "噪声抑制 - 使用噪声门减少背景噪音",
+                "auto_gain_control": "自动增益控制 - 保持音量稳定",
+                "voice_activity_detection": "语音活动检测 - 只在有语音时发送音频",
+                "input_volume": "输入音量 (0.0-1.0)",
+                "output_volume": "输出音量 (0.0-1.0)",
+                "noise_gate_threshold": "噪声门阈值 - 低于此值的信号将被衰减",
+                "echo_threshold": "回声检测相关性阈值 - 越高越严格 (推荐0.6-0.8)",
+                "echo_suppression_factor": "回声抑制强度 - 越高抑制越强 (推荐0.5-0.8)",
+                "min_suppression": "最小抑制比例 - 避免完全静音 (推荐0.2-0.4)",
+                "adaptive_threshold": "自适应阈值 - 根据环境自动调整检测阈值",
+                "debug_audio_processing": "调试模式 - 显示详细的音频处理信息"
+            },
+            "troubleshooting": {
+                "no_sound_after_echo_cancellation": {
+                    "problem": "启用回声消除后没有声音",
+                    "solutions": [
+                        "降低echo_threshold到0.5或更低",
+                        "增加min_suppression到0.4或更高",
+                        "启用debug_audio_processing查看处理详情",
+                        "暂时关闭echo_cancellation进行对比"
+                    ]
+                },
+                "sound_cutting_off": {
+                    "problem": "声音断断续续",
+                    "solutions": [
+                        "关闭voice_activity_detection",
+                        "降低noise_gate_threshold到0.005",
+                        "启用adaptive_threshold",
+                        "检查网络连接稳定性"
+                    ]
+                },
+                "echo_still_present": {
+                    "problem": "仍然有回声",
+                    "solutions": [
+                        "降低echo_threshold到0.4",
+                        "增加echo_suppression_factor到0.8",
+                        "使用耳机替代扬声器",
+                        "调整麦克风和扬声器位置"
+                    ]
+                }
+            }
+        }
+        
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"❌ 创建默认配置文件失败: {e}")
 
     def connect(self) -> bool:
         """连接到服务器"""
@@ -678,30 +804,104 @@ class CloudVoIPClient:
             return audio_data
 
     def apply_echo_cancellation(self, input_audio, reference_audio=None):
-        """简单的回声消除"""
+        """智能回声消除 - 改进版本"""
         if not hasattr(self, 'numpy_available'):
             self.numpy_available = self.audio_processing_init()
         
-        if not self.numpy_available or not reference_audio:
+        if not self.numpy_available or not reference_audio or len(self.audio_history) == 0:
             return input_audio
         
         try:
             # 将音频数据转换为numpy数组
-            input_samples = np.frombuffer(input_audio, dtype=np.int16).astype(np.float32)
-            ref_samples = np.frombuffer(reference_audio, dtype=np.int16).astype(np.float32)
+            input_samples = np.frombuffer(input_audio, dtype=np.int16).astype(np.float32) / 32768.0
             
-            # 简单的自适应滤波器（LMS算法的简化版本）
-            if len(input_samples) == len(ref_samples):
-                # 计算相关性
-                correlation = np.correlate(input_samples, ref_samples, mode='valid')
-                if len(correlation) > 0 and abs(correlation[0]) > 0.3 * len(input_samples):
-                    # 如果相关性高，减少输入信号强度
-                    input_samples = input_samples * 0.5
+            # 初始化回声检测变量
+            echo_detected = False
+            suppression_factor = 1.0
             
-            return input_samples.astype(np.int16).tobytes()
+            # 多帧回声检测
+            correlation_scores = []
+            
+            # 检查最近几帧的相关性
+            check_frames = min(len(self.audio_history), self.echo_detection_window)
+            
+            for i in range(check_frames):
+                ref_samples = np.frombuffer(self.audio_history[-(i+1)], dtype=np.int16).astype(np.float32) / 32768.0
+                
+                if len(input_samples) == len(ref_samples):
+                    # 检查数据有效性，避免除零警告
+                    input_std = np.std(input_samples)
+                    ref_std = np.std(ref_samples)
+                    
+                    # 只有在两个信号都有足够的变化时才计算相关性
+                    if input_std > 1e-8 and ref_std > 1e-8:
+                        # 计算互相关
+                        correlation = np.corrcoef(input_samples, ref_samples)[0, 1]
+                        if not np.isnan(correlation):
+                            correlation_scores.append(abs(correlation))
+            
+            # 如果有有效的相关性分数
+            if correlation_scores:
+                max_correlation = max(correlation_scores)
+                avg_correlation = np.mean(correlation_scores)
+                
+                # 更智能的回声检测逻辑
+                input_energy = np.sum(input_samples**2)
+                
+                # 只有在输入能量足够且相关性很高时才认为是回声
+                if (max_correlation > self.echo_threshold and 
+                    avg_correlation > 0.4 and 
+                    input_energy > 0.001):  # 确保有足够的信号能量
+                    
+                    echo_detected = True
+                    
+                    # 动态计算抑制因子
+                    # 相关性越高，抑制越强，但保留最小比例
+                    base_suppression = max_correlation * self.echo_suppression_factor
+                    suppression_factor = max(self.min_suppression, 1.0 - base_suppression)
+                    
+                    # 频率域处理（如果启用谱减法）
+                    if self.spectral_subtraction:
+                        suppression_factor = self.apply_spectral_subtraction(
+                            input_samples, ref_samples, suppression_factor)
+            
+            # 应用抑制
+            if echo_detected:
+                # 渐进式抑制，避免突然的音量变化
+                output_samples = input_samples * suppression_factor
+                
+                # 保留一些原始信号特征，避免完全静音
+                if suppression_factor < 0.5:
+                    # 加入少量原始信号，保持语音自然度
+                    output_samples = output_samples * 0.8 + input_samples * 0.2
+            else:
+                output_samples = input_samples
+            
+            # 转换回字节数据
+            return (np.clip(output_samples * 32767, -32767, 32767)).astype(np.int16).tobytes()
             
         except Exception as e:
+            # 如果处理失败，返回原始数据
             return input_audio
+
+    def apply_spectral_subtraction(self, input_samples, ref_samples, base_factor):
+        """谱减法增强回声消除"""
+        try:
+            # 简化的谱减法
+            # 在频域中进行更精细的回声消除
+            input_fft = np.fft.rfft(input_samples)
+            ref_fft = np.fft.rfft(ref_samples)
+            
+            # 计算频域相关性
+            magnitude_ratio = np.abs(input_fft) / (np.abs(ref_fft) + 1e-10)
+            
+            # 只在相似频率成分上进行抑制
+            suppression_mask = np.where(magnitude_ratio > 0.5, base_factor, 1.0)
+            
+            return np.mean(suppression_mask)
+            
+        except Exception:
+            return base_factor
 
     def apply_auto_gain_control(self, audio_data):
         """自动增益控制，保持音量稳定"""
@@ -735,7 +935,7 @@ class CloudVoIPClient:
             return audio_data
 
     def detect_voice_activity(self, audio_data):
-        """语音活动检测"""
+        """改进的语音活动检测"""
         if not hasattr(self, 'numpy_available'):
             self.numpy_available = self.audio_processing_init()
         
@@ -743,20 +943,71 @@ class CloudVoIPClient:
             return True  # 如果无法检测，假设有语音活动
         
         try:
-            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             
-            # 计算能量
-            energy = np.sum(samples**2)
+            # 1. 能量检测
+            energy = np.sum(samples**2) / len(samples)
             
-            # 计算过零率
+            # 2. 过零率检测
             zero_crossings = np.sum(np.diff(np.sign(samples)) != 0)
             zero_crossing_rate = zero_crossings / len(samples)
             
-            # 简单的VAD判断
-            energy_threshold = 1000000  # 能量阈值
-            zcr_threshold = 0.1         # 过零率阈值
+            # 3. 频谱质心（语音的频谱特征）
+            try:
+                fft = np.fft.rfft(samples)
+                magnitude = np.abs(fft)
+                freqs = np.fft.rfftfreq(len(samples), 1.0 / 16000)
+                
+                if np.sum(magnitude) > 0:
+                    spectral_centroid = np.sum(freqs * magnitude) / np.sum(magnitude)
+                else:
+                    spectral_centroid = 0
+            except:
+                spectral_centroid = 0
             
-            has_voice = energy > energy_threshold and zero_crossing_rate > zcr_threshold
+            # 4. 短时能量变化率
+            if hasattr(self, 'prev_energy'):
+                energy_delta = abs(energy - self.prev_energy)
+            else:
+                energy_delta = 0
+            self.prev_energy = energy
+            
+            # 自适应阈值
+            if self.adaptive_threshold:
+                # 动态调整阈值
+                if hasattr(self, 'avg_noise_energy'):
+                    self.avg_noise_energy = 0.95 * self.avg_noise_energy + 0.05 * energy
+                    energy_threshold = max(self.avg_noise_energy * 3, 0.001)
+                else:
+                    self.avg_noise_energy = energy
+                    energy_threshold = 0.001
+            else:
+                energy_threshold = 0.001
+            
+            # 综合判断
+            conditions = [
+                energy > energy_threshold,                    # 能量足够
+                zero_crossing_rate > 0.02,                   # 过零率适中（不是纯噪声）
+                zero_crossing_rate < 0.8,                    # 过零率不过高（不是高频噪声）
+                spectral_centroid > 100,                     # 频谱质心在语音范围
+                spectral_centroid < 4000                     # 频谱质心不过高
+            ]
+            
+            # 至少满足3个条件才认为有语音
+            voice_score = sum(conditions)
+            has_voice = voice_score >= 3
+            
+            # 避免频繁切换
+            if hasattr(self, 'voice_history'):
+                self.voice_history.append(has_voice)
+                if len(self.voice_history) > 5:
+                    self.voice_history.pop(0)
+                
+                # 使用滑动窗口平滑决策
+                recent_voice_count = sum(self.voice_history)
+                has_voice = recent_voice_count >= 3  # 5帧中至少3帧有语音
+            else:
+                self.voice_history = [has_voice]
             
             return has_voice
             
@@ -764,29 +1015,84 @@ class CloudVoIPClient:
             return True
 
     def process_input_audio(self, audio_data):
-        """处理输入音频数据"""
+        """处理输入音频数据 - 改进版本"""
         if not self.echo_cancellation and not self.noise_suppression and not self.auto_gain_control:
             # 如果没有启用任何处理，只调整音量
             return self.adjust_volume(audio_data, self.input_volume)
         
         processed_data = audio_data
+        processing_log = []
         
-        # 1. 噪声门
+        # 检测输入信号特征
+        if hasattr(self, 'numpy_available') and self.numpy_available:
+            try:
+                samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                input_energy = np.sum(samples**2) / len(samples)
+                input_rms = np.sqrt(input_energy)
+                processing_log.append(f"输入RMS: {input_rms:.4f}")
+            except:
+                input_energy = 0
+                input_rms = 0
+        
+        # 1. 噪声门 - 但要更宽松
         if self.noise_suppression:
             processed_data = self.apply_noise_gate(processed_data)
+            processing_log.append("应用噪声门")
         
-        # 2. 回声消除
-        if self.echo_cancellation and len(self.audio_history) > 0:
-            # 使用最近的输出音频作为参考
+        # 2. 回声消除 - 仅在有足够历史数据时应用
+        if self.echo_cancellation and len(self.audio_history) >= 2:
+            # 使用最近的输出音频作为参考，但要检查能量
             reference = self.audio_history[-1] if self.audio_history else None
-            processed_data = self.apply_echo_cancellation(processed_data, reference)
+            if reference:
+                # 检查参考信号强度，避免在无输出时进行回声消除
+                try:
+                    ref_samples = np.frombuffer(reference, dtype=np.int16).astype(np.float32) / 32768.0
+                    ref_energy = np.sum(ref_samples**2) / len(ref_samples)
+                    
+                    # 只有在参考信号有足够能量时才进行回声消除
+                    if ref_energy > 0.0001:
+                        old_data = processed_data
+                        processed_data = self.apply_echo_cancellation(processed_data, reference)
+                        
+                        # 检查是否过度抑制
+                        if hasattr(self, 'numpy_available') and self.numpy_available:
+                            try:
+                                old_samples = np.frombuffer(old_data, dtype=np.int16).astype(np.float32) / 32768.0
+                                new_samples = np.frombuffer(processed_data, dtype=np.int16).astype(np.float32) / 32768.0
+                                
+                                old_rms = np.sqrt(np.sum(old_samples**2) / len(old_samples))
+                                new_rms = np.sqrt(np.sum(new_samples**2) / len(new_samples))
+                                
+                                # 如果抑制过度（超过90%），恢复部分原始信号
+                                if old_rms > 0 and (new_rms / old_rms) < 0.1:
+                                    recovery_factor = 0.3
+                                    recovered_samples = new_samples * (1 - recovery_factor) + old_samples * recovery_factor
+                                    processed_data = (np.clip(recovered_samples * 32767, -32767, 32767)).astype(np.int16).tobytes()
+                                    processing_log.append(f"回声消除+恢复 (因子: {recovery_factor})")
+                                else:
+                                    processing_log.append(f"回声消除 (抑制率: {1-(new_rms/old_rms if old_rms > 0 else 0):.2f})")
+                            except:
+                                processing_log.append("回声消除")
+                    else:
+                        processing_log.append("跳过回声消除 (参考信号弱)")
+                except:
+                    pass
+        elif self.echo_cancellation:
+            processing_log.append("等待回声消除历史数据")
         
-        # 3. 自动增益控制
+        # 3. 自动增益控制 - 最后应用
         if self.auto_gain_control:
             processed_data = self.apply_auto_gain_control(processed_data)
+            processing_log.append("自动增益控制")
         
         # 4. 音量调整
         processed_data = self.adjust_volume(processed_data, self.input_volume)
+        processing_log.append(f"音量调整 ({self.input_volume})")
+        
+        # 调试信息（可选）
+        if hasattr(self, 'debug_audio_processing') and self.debug_audio_processing:
+            if processing_log:
+                print(f"[音频处理] {' -> '.join(processing_log)}")
         
         return processed_data
 
@@ -823,38 +1129,77 @@ class CloudVoIPClient:
             return audio_data
 
     def audio_send_loop(self):
-        """音频发送循环"""
+        """音频发送循环 - 改进版本"""
+        consecutive_silence = 0
+        frames_processed = 0
+        
         while self.current_call and self.audio_input:
             try:
                 # 读取音频数据
                 data = self.audio_input.read(self.chunk, exception_on_overflow=False)
+                frames_processed += 1
                 
                 # 语音活动检测
+                has_voice = True
                 if self.voice_activity_detection:
-                    if not self.detect_voice_activity(data):
-                        # 如果没有语音活动，发送静音或跳过发送
-                        continue
+                    has_voice = self.detect_voice_activity(data)
+                    
+                    if not has_voice:
+                        consecutive_silence += 1
+                        # 允许短暂的静音期，避免切断正常语音间隙
+                        if consecutive_silence < 3:  # 允许3帧的静音
+                            has_voice = True
+                    else:
+                        consecutive_silence = 0
                 
-                # 音频处理
-                processed_data = self.process_input_audio(data)
-                
-                # 构造音频包
-                if self.audio_socket and self.current_call:
-                    # 获取目标客户端ID - 修复变量名错误
-                    target_id = self.current_call.get('peer', '')
-                    if target_id:
-                        # 构造包头：源客户端ID + 目标客户端ID
-                        header = self.client_id.encode('utf-8').ljust(16, b'\x00')  # 16字节源ID
-                        header += target_id.encode('utf-8').ljust(16, b'\x00')      # 16字节目标ID
-                        packet = header + processed_data
-                        
-                        # 发送到服务器
+                # 如果检测到语音活动或关闭了VAD，进行处理
+                if has_voice or not self.voice_activity_detection:
+                    # 音频处理
+                    processed_data = self.process_input_audio(data)
+                    
+                    # 检查处理后是否还有信号
+                    if hasattr(self, 'numpy_available') and self.numpy_available:
                         try:
-                            self.audio_socket.sendto(packet, (self.server_ip, self.audio_port))
-                        except Exception as send_e:
-                            print(f"音频发送失败: {send_e}")
+                            processed_samples = np.frombuffer(processed_data, dtype=np.int16).astype(np.float32)
+                            processed_energy = np.sum(processed_samples**2) / len(processed_samples)
+                            
+                            # 如果处理后能量过低，使用原始数据的一定比例
+                            if processed_energy < 10:  # 很低的阈值
+                                original_samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                                original_energy = np.sum(original_samples**2) / len(original_samples)
+                                
+                                if original_energy > 1000:  # 原始信号有足够能量
+                                    # 混合原始信号和处理后信号
+                                    mixed_samples = processed_samples * 0.7 + original_samples * 0.3
+                                    processed_data = mixed_samples.astype(np.int16).tobytes()
+                                    
+                                    if frames_processed % 100 == 0:  # 每100帧打印一次
+                                        print(f"[音频恢复] 混合原始信号以保持音质")
+                        except:
+                            pass
+                    
+                    # 构造音频包并发送
+                    if self.audio_socket and self.current_call:
+                        target_id = self.current_call.get('peer', '')
+                        if target_id:
+                            # 构造包头：源客户端ID + 目标客户端ID
+                            header = self.client_id.encode('utf-8').ljust(16, b'\x00')
+                            header += target_id.encode('utf-8').ljust(16, b'\x00')
+                            packet = header + processed_data
+                            
+                            try:
+                                self.audio_socket.sendto(packet, (self.server_ip, self.audio_port))
+                            except Exception as send_e:
+                                print(f"音频发送失败: {send_e}")
+                    else:
+                        time.sleep(0.01)
                 else:
-                    time.sleep(0.01)  # 避免过度消耗CPU
+                    # 发送静音或跳过发送
+                    time.sleep(0.01)
+                    
+                # 定期状态报告
+                if frames_processed % 1000 == 0 and hasattr(self, 'debug_audio_processing') and self.debug_audio_processing:
+                    print(f"[音频状态] 已处理 {frames_processed} 帧，连续静音 {consecutive_silence} 帧")
                     
             except Exception as e:
                 if self.current_call:
@@ -1168,13 +1513,14 @@ class CloudVoIPClient:
             print(f"  5. 输入音量:     {self.input_volume:.1f}")
             print(f"  6. 输出音量:     {self.output_volume:.1f}")
             print(f"  7. 噪声门阈值:   {self.noise_gate_threshold:.3f}")
-            print("  8. 重置为默认设置")
-            print("  9. 保存当前设置")
+            print(f"  8. 调试模式:     {'✅ 启用' if getattr(self, 'debug_audio_processing', False) else '❌ 禁用'}")
+            print("  9. 重置为默认设置")
+            print("  s. 保存当前设置")
             print("  0. 返回主菜单")
             print(f"{'='*60}")
             
             try:
-                choice = input("请选择 (0-9): ").strip()
+                choice = input("请选择 (0-9/s): ").strip().lower()
                 
                 if choice == '0':
                     break
@@ -1221,9 +1567,14 @@ class CloudVoIPClient:
                     except ValueError:
                         print("❌ 请输入有效数字")
                 elif choice == '8':
+                    self.debug_audio_processing = not getattr(self, 'debug_audio_processing', False)
+                    print(f"音频调试模式已{'启用' if self.debug_audio_processing else '禁用'}")
+                    if self.debug_audio_processing:
+                        print("💡 提示: 调试模式会显示音频处理详细信息")
+                elif choice == '9':
                     self.reset_audio_defaults()
                     print("✅ 音频设置已重置为默认值")
-                elif choice == '9':
+                elif choice == 's':
                     self.save_audio_config()
                 else:
                     print("❌ 无效选择")
@@ -1266,7 +1617,7 @@ class CloudVoIPClient:
                 }
             }
             
-            config_path = os.path.join(os.path.dirname(__file__), config_file)
+            config_path = get_config_path(config_file)
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
             

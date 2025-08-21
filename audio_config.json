@@ -8,13 +8,16 @@
     "output_volume": 0.8,
     "noise_gate_threshold": 0.01,
     "echo_delay_samples": 1024,
-    "history_size": 10,
+    "history_size": 5,
     "silence_threshold": 50,
-    "energy_threshold": 1000000,
-    "zero_crossing_threshold": 0.1,
-    "target_rms": 3000.0,
-    "max_gain": 2.0,
-    "min_gain": 0.5
+    "echo_threshold": 0.6,
+    "echo_suppression_factor": 0.7,
+    "min_suppression": 0.3,
+    "echo_learning_rate": 0.1,
+    "spectral_subtraction": false,
+    "adaptive_threshold": true,
+    "echo_detection_window": 3,
+    "debug_audio_processing": false
   },
   "advanced_settings": {
     "chunk_size": 1024,
@@ -25,14 +28,46 @@
     "audio_buffer_size": 4096
   },
   "description": {
-    "echo_cancellation": "回声消除 - 减少扬声器声音被麦克风捕获",
+    "echo_cancellation": "回声消除 - 智能检测并减少扬声器声音被麦克风捕获",
     "noise_suppression": "噪声抑制 - 使用噪声门减少背景噪音",
     "auto_gain_control": "自动增益控制 - 保持音量稳定",
     "voice_activity_detection": "语音活动检测 - 只在有语音时发送音频",
     "input_volume": "输入音量 (0.0-1.0)",
     "output_volume": "输出音量 (0.0-1.0)",
     "noise_gate_threshold": "噪声门阈值 - 低于此值的信号将被衰减",
-    "energy_threshold": "语音检测能量阈值",
-    "target_rms": "AGC目标RMS值"
+    "echo_threshold": "回声检测相关性阈值 - 越高越严格 (推荐0.6-0.8)",
+    "echo_suppression_factor": "回声抑制强度 - 越高抑制越强 (推荐0.5-0.8)",
+    "min_suppression": "最小抑制比例 - 避免完全静音 (推荐0.2-0.4)",
+    "adaptive_threshold": "自适应阈值 - 根据环境自动调整检测阈值",
+    "debug_audio_processing": "调试模式 - 显示详细的音频处理信息"
+  },
+  "troubleshooting": {
+    "no_sound_after_echo_cancellation": {
+      "problem": "启用回声消除后没有声音",
+      "solutions": [
+        "降低echo_threshold到0.5或更低",
+        "增加min_suppression到0.4或更高",
+        "启用debug_audio_processing查看处理详情",
+        "暂时关闭echo_cancellation进行对比"
+      ]
+    },
+    "sound_cutting_off": {
+      "problem": "声音断断续续",
+      "solutions": [
+        "关闭voice_activity_detection",
+        "降低noise_gate_threshold到0.005",
+        "启用adaptive_threshold",
+        "检查网络连接稳定性"
+      ]
+    },
+    "echo_still_present": {
+      "problem": "仍然有回声",
+      "solutions": [
+        "降低echo_threshold到0.4",
+        "增加echo_suppression_factor到0.8",
+        "使用耳机替代扬声器",
+        "调整麦克风和扬声器位置"
+      ]
+    }
   }
 }

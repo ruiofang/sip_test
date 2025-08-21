@@ -23,9 +23,25 @@ import socket
 import time
 from typing import Dict, Any, Optional
 
+
+def get_config_path(filename):
+    """
+    获取配置文件的正确路径
+    兼容PyInstaller打包后的环境
+    """
+    if getattr(sys, 'frozen', False):
+        # 如果是PyInstaller打包的可执行文件
+        base_path = os.path.dirname(sys.executable)
+    else:
+        # 如果是普通Python脚本
+        base_path = os.path.dirname(__file__)
+    
+    return os.path.join(base_path, filename)
+
+
 class VoIPClientLauncher:
     def __init__(self):
-        self.config_file = "client_config.json"
+        self.config_file = get_config_path("client_config.json")
         self.config = self.load_config()
         self.python_cmd = self.get_python_command()
     
@@ -83,6 +99,12 @@ class VoIPClientLauncher:
                     if key not in config:
                         config[key] = default_config[key]
                 return config
+            else:
+                print(f"⚠️ 配置文件不存在，正在创建默认配置: {self.config_file}")
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(default_config, f, indent=2, ensure_ascii=False)
+                print(f"✅ 已创建默认配置文件: {self.config_file}")
+                return default_config
         except Exception as e:
             print(f"⚠️ 加载配置文件失败，使用默认配置: {e}")
         

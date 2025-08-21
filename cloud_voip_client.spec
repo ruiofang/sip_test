@@ -7,7 +7,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('client_config.json', '.'),  # 包含配置文件
+        # 不打包配置文件，让它们与可执行文件在同一目录
     ],
     hiddenimports=[
         'pyaudio',
