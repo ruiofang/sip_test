@@ -14,7 +14,7 @@
 使用方法:
 python3 cloud_voip_client.py --server SERVER_IP [--name CLIENT_NAME]
 
-作者: GitHub Copilot
+作者: RUIO
 日期: 2025年8月20日
 """
 
@@ -241,6 +241,9 @@ class CloudVoIPClient:
             self.handle_call_hangup(message)
         elif msg_type == 'client_list':
             self.handle_client_list(message)
+        elif msg_type == 'heartbeat':
+            # 心跳消息，静默处理
+            pass
         else:
             print(f"收到未知消息类型: {msg_type}")
 
@@ -262,6 +265,7 @@ class CloudVoIPClient:
         
         time_str = time.strftime("%H:%M:%S", time.localtime(timestamp))
         print(f"\n📢 [广播] {sender} ({time_str}): {content}")
+        print(f"{self.client_name}> ", end="", flush=True)
 
     def handle_private_message(self, message: Dict[str, Any]):
         """处理私聊消息"""
@@ -271,6 +275,7 @@ class CloudVoIPClient:
         
         time_str = time.strftime("%H:%M:%S", time.localtime(timestamp))
         print(f"\n💬 [私聊] {sender} ({time_str}): {content}")
+        print(f"{self.client_name}> ", end="", flush=True)
 
     def handle_call_request(self, message: Dict[str, Any]):
         """处理通话请求"""
@@ -299,6 +304,7 @@ class CloudVoIPClient:
         
         if accepted:
             print(f"✅ {responder} 接受了您的通话请求")
+            print(f"{self.client_name}> ", end="", flush=True)
             with self.call_lock:
                 self.current_call = {
                     'id': call_id,
@@ -308,6 +314,7 @@ class CloudVoIPClient:
             self.start_audio_streams()
         else:
             print(f"❌ {responder} 拒绝了您的通话请求")
+            print(f"{self.client_name}> ", end="", flush=True)
 
     def handle_call_hangup(self, message: Dict[str, Any]):
         """处理挂断通话"""
@@ -315,6 +322,7 @@ class CloudVoIPClient:
         peer = message.get('from')
         
         print(f"📞 {peer} 挂断了通话")
+        print(f"{self.client_name}> ", end="", flush=True)
         
         with self.call_lock:
             self.current_call = None
@@ -323,44 +331,20 @@ class CloudVoIPClient:
 
     def show_call_options(self, call_id: str, caller: str):
         """显示通话选项界面"""
-        # 在单独线程中处理用户输入，避免阻塞消息接收
+        # 自动接听模式，无需用户输入
         def handle_call_input():
             print(f"\n{'='*50}")
             print(f"📞 来自 {caller} 的通话请求")
             print(f"通话ID: {call_id}")
             print(f"{'='*50}")
-            print("请选择操作:")
-            print("  1. 接受通话")
-            print("  2. 拒绝通话")
+            print("🤖 自动接听模式: 正在自动接受通话...")
             print(f"{'='*50}")
             
-            # 设置30秒超时自动拒绝
-            timeout = 30
-            print(f"⏰ 请在 {timeout} 秒内选择，否则自动拒绝通话")
-            
-            start_time = time.time()
-            while call_id in getattr(self, 'pending_calls', {}):
-                try:
-                    # 检查超时
-                    if time.time() - start_time > timeout:
-                        print(f"\n⏰ 超时未响应，自动拒绝来自 {caller} 的通话")
-                        self.reject_call(call_id)
-                        break
-                    
-                    choice = input("请输入选项 (1/2): ").strip()
-                    
-                    if choice == '1':
-                        self.accept_call(call_id)
-                        break
-                    elif choice == '2':
-                        self.reject_call(call_id)
-                        break
-                    else:
-                        print("❌ 无效选项，请输入 1 或 2")
-                except (EOFError, KeyboardInterrupt):
-                    print(f"\n❌ 操作被取消，自动拒绝来自 {caller} 的通话")
-                    self.reject_call(call_id)
-                    break
+            # 自动接受通话
+            if call_id in getattr(self, 'pending_calls', {}):
+                self.accept_call(call_id)
+            else:
+                print(f"❌ 通话ID {call_id} 不存在")
         
         # 在单独线程中处理
         input_thread = threading.Thread(target=handle_call_input, daemon=True)
@@ -381,6 +365,7 @@ class CloudVoIPClient:
         # 设置事件，通知show_clients函数
         self.client_list_event.set()
         print(f"✅ 客户端列表更新完成")
+        print(f"{self.client_name}> ", end="", flush=True)
 
     def request_client_list(self):
         """请求客户端列表"""
@@ -667,7 +652,7 @@ class CloudVoIPClient:
         print("  status                     - 显示客户端状态")
         print("  quit                       - 退出客户端")
         print("  help                       - 显示帮助")
-        print("💡 提示: 收到通话请求时会自动显示接受/拒绝选项")
+        print("🤖 提示: 已开启自动接听模式，来电将自动接受")
         print("=" * 60)
         
         while self.running and self.connected:
@@ -681,6 +666,7 @@ class CloudVoIPClient:
                 
                 if cmd == 'quit':
                     print("正在退出...")
+                    self.running = False  # 设置为False表示用户主动退出
                     break
                 elif cmd == 'clients':
                     self.show_clients()
@@ -741,12 +727,13 @@ class CloudVoIPClient:
                     print("  status                     - 显示客户端状态")
                     print("  quit                       - 退出客户端")
                     print("  help                       - 显示帮助")
-                    print("\n💡 提示: 收到通话请求时会自动显示接受/拒绝选项，无需记忆复杂命令！")
+                    print("\n🤖 提示: 已开启自动接听模式，来电将自动接受！")
                 else:
                     print(f"未知命令: {cmd}. 输入 'help' 查看可用命令")
                     
             except KeyboardInterrupt:
                 print("\n收到中断信号，正在退出...")
+                self.running = False  # 用户按Ctrl+C也算主动退出
                 break
             except EOFError:
                 break
@@ -896,10 +883,13 @@ class CloudVoIPClient:
         except KeyboardInterrupt:
             print("\n已取消发送")
 
-    def disconnect(self):
+    def disconnect(self, user_initiated=False):
         """断开连接"""
         print("正在断开连接...")
-        self.running = False
+        
+        # 只有在用户主动断开时才设置running=False
+        if user_initiated:
+            self.running = False
         self.connected = False
         
         # 挂断当前通话
@@ -930,22 +920,66 @@ def main():
     parser.add_argument('--server', required=True, help='服务器IP地址')
     parser.add_argument('--name', help='客户端名称')
     parser.add_argument('--port', type=int, default=5060, help='服务器端口 (默认: 5060)')
+    parser.add_argument('--auto-reconnect', action='store_true', help='自动重连模式')
     
     args = parser.parse_args()
     
-    client = CloudVoIPClient(
-        server_ip=args.server,
-        client_name=args.name,
-        base_port=args.port
-    )
-    
-    try:
-        if client.connect():
-            client.interactive_mode()
-    except KeyboardInterrupt:
-        print("\n收到中断信号")
-    finally:
-        client.disconnect()
+    if args.auto_reconnect:
+        # 自动重连模式
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                if retry_count > 0:
+                    print(f"\n🔄 第 {retry_count + 1} 次连接尝试...")
+                    time.sleep(2)
+                
+                client = CloudVoIPClient(
+                    server_ip=args.server,
+                    client_name=args.name,
+                    base_port=args.port
+                )
+                
+                if client.connect():
+                    print(f"✅ 连接成功 (第 {retry_count + 1} 次尝试)")
+                    client.interactive_mode()
+                else:
+                    print(f"❌ 连接失败 (第 {retry_count + 1} 次尝试)")
+                
+                # 连接断开后检查是否用户主动退出
+                user_quit = not client.running
+                client.disconnect()
+                retry_count += 1
+                
+                # 如果是正常退出(用户输入quit)，则不重连
+                if user_quit:
+                    print("🚪 用户主动退出，停止重连")
+                    break
+                    
+            except KeyboardInterrupt:
+                print(f"\n🛑 用户中断，停止重连")
+                break
+            except Exception as e:
+                print(f"❌ 客户端异常: {e}")
+                retry_count += 1
+                
+        print("📞 自动重连已结束")
+    else:
+        # 标准模式
+        client = CloudVoIPClient(
+            server_ip=args.server,
+            client_name=args.name,
+            base_port=args.port
+        )
+        
+        try:
+            if client.connect():
+                client.interactive_mode()
+        except KeyboardInterrupt:
+            print("\n收到中断信号")
+        finally:
+            client.disconnect(user_initiated=True)
 
 
 if __name__ == "__main__":

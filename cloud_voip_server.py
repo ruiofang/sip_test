@@ -20,7 +20,7 @@
 使用方法:
 python cloud_voip_server.py [--host HOST] [--port PORT]
 
-作者: GitHub Copilot
+作者: RUIO
 日期: 2025年8月20日
 """
 
@@ -84,6 +84,11 @@ class CloudVoIPServer:
         self.rooms_lock = threading.Lock()
         self.calls_lock = threading.Lock()
         
+        # 清理相关配置
+        self.client_timeout = 60  # 客户端超时时间（秒）
+        self.heartbeat_interval = 30  # 心跳检查间隔（秒）
+        self.cleanup_thread = None
+        
         # 日志配置
         self.setup_logging()
 
@@ -135,6 +140,10 @@ class CloudVoIPServer:
             
         if self.init_control_server():
             services_started += 1
+        
+        # 启动清理线程
+        if self.init_cleanup_thread():
+            self.logger.info("清理线程已启动")
         
         if services_started > 0:
             self.logger.info(f"服务器启动成功，{services_started}/3 个服务已启动")
@@ -204,6 +213,212 @@ class CloudVoIPServer:
         except Exception as e:
             self.logger.error(f"控制服务器初始化失败: {e}")
             return False
+
+    def init_cleanup_thread(self):
+        """初始化清理线程"""
+        try:
+            self.cleanup_thread = threading.Thread(target=self.cleanup_thread_worker)
+            self.cleanup_thread.daemon = True
+            self.cleanup_thread.start()
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"清理线程初始化失败: {e}")
+            return False
+
+    def cleanup_thread_worker(self):
+        """清理线程工作函数"""
+        self.logger.info("清理线程已启动，开始监控无效连接和过期数据")
+        
+        while self.running:
+            try:
+                # 等待心跳间隔时间
+                for _ in range(self.heartbeat_interval):
+                    if not self.running:
+                        break
+                    time.sleep(1)
+                
+                if not self.running:
+                    break
+                
+                # 执行清理任务
+                self.cleanup_inactive_clients()
+                self.cleanup_expired_calls()
+                self.cleanup_empty_rooms()
+                self.send_heartbeat_requests()
+                
+            except Exception as e:
+                if self.running:
+                    self.logger.error(f"清理线程错误: {e}")
+                    time.sleep(5)  # 发生错误时稍作等待
+        
+        self.logger.info("清理线程已停止")
+
+    def cleanup_inactive_clients(self):
+        """清理不活跃的客户端"""
+        current_time = time.time()
+        clients_to_remove = []
+        
+        with self.clients_lock:
+            for client_id, client_info in self.clients.items():
+                last_seen = client_info.get('last_seen', 0)
+                if current_time - last_seen > self.client_timeout:
+                    clients_to_remove.append(client_id)
+        
+        # 清理过期客户端
+        for client_id in clients_to_remove:
+            self.remove_client(client_id, "连接超时")
+
+    def cleanup_expired_calls(self):
+        """清理过期的通话记录"""
+        current_time = time.time()
+        calls_to_remove = []
+        
+        with self.calls_lock:
+            for call_id, call_info in self.calls.items():
+                # 清理超过10分钟的非活跃通话
+                if (current_time - call_info['start_time'] > 600 and 
+                    call_info['status'] in ['requesting', 'rejected', 'ended']):
+                    calls_to_remove.append(call_id)
+                # 清理超过2小时的活跃通话（可能是异常情况）
+                elif (current_time - call_info['start_time'] > 7200 and 
+                      call_info['status'] == 'active'):
+                    calls_to_remove.append(call_id)
+        
+        # 清理过期通话
+        with self.calls_lock:
+            for call_id in calls_to_remove:
+                if call_id in self.calls:
+                    call_info = self.calls[call_id]
+                    self.logger.info(f"清理过期通话: {call_id} (状态: {call_info['status']})")
+                    del self.calls[call_id]
+
+    def cleanup_empty_rooms(self):
+        """清理空房间"""
+        rooms_to_remove = []
+        
+        with self.rooms_lock:
+            for room_id, members in self.rooms.items():
+                # 移除不存在的客户端
+                valid_members = []
+                with self.clients_lock:
+                    for member_id in members:
+                        if member_id in self.clients and self.clients[member_id]['status'] == 'online':
+                            valid_members.append(member_id)
+                
+                if not valid_members:
+                    rooms_to_remove.append(room_id)
+                elif len(valid_members) != len(members):
+                    # 更新房间成员列表
+                    self.rooms[room_id] = valid_members
+                    self.logger.info(f"房间 {room_id} 成员已更新: {valid_members}")
+        
+        # 清理空房间
+        with self.rooms_lock:
+            for room_id in rooms_to_remove:
+                if room_id in self.rooms:
+                    self.logger.info(f"清理空房间: {room_id}")
+                    del self.rooms[room_id]
+
+    def send_heartbeat_requests(self):
+        """发送心跳请求给所有在线客户端"""
+        heartbeat_msg = {
+            'type': 'heartbeat',
+            'timestamp': time.time(),
+            'server_time': time.time()
+        }
+        
+        clients_to_check = []
+        with self.clients_lock:
+            for client_id, client_info in self.clients.items():
+                if client_info['status'] == 'online':
+                    clients_to_check.append((client_id, client_info['socket']))
+        
+        # 发送心跳消息
+        sent_count = 0
+        failed_clients = []
+        
+        for client_id, client_socket in clients_to_check:
+            try:
+                self.send_message(client_socket, heartbeat_msg)
+                sent_count += 1
+            except Exception as e:
+                self.logger.warning(f"向客户端 {client_id} 发送心跳失败: {e}")
+                failed_clients.append(client_id)
+        
+        # 标记发送失败的客户端为可能断开连接
+        for client_id in failed_clients:
+            self.remove_client(client_id, "心跳发送失败")
+        
+        if sent_count > 0:
+            self.logger.debug(f"心跳请求已发送给 {sent_count} 个客户端")
+
+    def remove_client(self, client_id: str, reason: str = "未知原因"):
+        """移除客户端并清理相关资源"""
+        self.logger.info(f"移除客户端 {client_id} ({reason})")
+        
+        with self.clients_lock:
+            if client_id in self.clients:
+                client_info = self.clients[client_id]
+                
+                # 关闭套接字连接
+                try:
+                    if 'socket' in client_info:
+                        client_info['socket'].close()
+                except:
+                    pass
+                
+                # 删除客户端记录
+                del self.clients[client_id]
+                
+            if client_id in self.client_sockets:
+                del self.client_sockets[client_id]
+            
+            # 清理音频地址缓存
+            if client_id in self.client_audio_addrs:
+                del self.client_audio_addrs[client_id]
+        
+        # 清理房间中的客户端
+        with self.rooms_lock:
+            rooms_to_update = []
+            for room_id, members in self.rooms.items():
+                if client_id in members:
+                    rooms_to_update.append(room_id)
+            
+            for room_id in rooms_to_update:
+                self.rooms[room_id].remove(client_id)
+                self.logger.info(f"从房间 {room_id} 移除客户端 {client_id}")
+        
+        # 清理相关通话
+        with self.calls_lock:
+            calls_to_end = []
+            for call_id, call_info in self.calls.items():
+                if call_info['caller'] == client_id or call_info['callee'] == client_id:
+                    calls_to_end.append(call_id)
+            
+            for call_id in calls_to_end:
+                call_info = self.calls[call_id]
+                other_client = (call_info['callee'] if call_info['caller'] == client_id 
+                              else call_info['caller'])
+                
+                # 通知另一方通话结束
+                hangup_msg = {
+                    'type': 'call_hangup',
+                    'call_id': call_id,
+                    'from': client_id,
+                    'reason': f'对方断开连接 ({reason})',
+                    'timestamp': time.time()
+                }
+                
+                with self.clients_lock:
+                    if other_client in self.clients:
+                        try:
+                            self.send_message(self.clients[other_client]['socket'], hangup_msg)
+                        except:
+                            pass
+                
+                self.logger.info(f"因客户端 {client_id} 断开连接而结束通话 {call_id}")
+                del self.calls[call_id]
 
     def message_server_thread(self):
         """消息服务器线程"""
@@ -309,13 +524,19 @@ class CloudVoIPServer:
                     
                     # 更新客户端信息
                     if client_id:
+                        current_time = time.time()
                         with self.clients_lock:
-                            self.clients[client_id] = {
-                                'addr': addr,
-                                'socket': client_sock,
-                                'last_seen': time.time(),
-                                'status': 'online'
-                            }
+                            if client_id in self.clients:
+                                # 更新现有客户端的最后活动时间
+                                self.clients[client_id]['last_seen'] = current_time
+                            else:
+                                # 新客户端（可能是重连）
+                                self.clients[client_id] = {
+                                    'addr': addr,
+                                    'socket': client_sock,
+                                    'last_seen': current_time,
+                                    'status': 'online'
+                                }
                             self.client_sockets[client_id] = client_sock
                     
                     # 处理不同类型的消息
@@ -391,6 +612,10 @@ class CloudVoIPServer:
         elif msg_type == 'get_clients':
             self.logger.info(f"调用 handle_get_clients 函数")
             self.handle_get_clients(message, client_sock)
+        elif msg_type == 'heartbeat_response':
+            self.handle_heartbeat_response(message, client_id)
+        elif msg_type == 'ping':
+            self.handle_ping_request(message, client_sock, client_id)
         else:
             self.logger.warning(f"未知消息类型: {msg_type}")
 
@@ -630,6 +855,36 @@ class CloudVoIPServer:
         except Exception as e:
             self.logger.error(f"发送客户端列表失败: {e}")
 
+    def handle_heartbeat_response(self, message: Dict[str, Any], client_id: str):
+        """处理心跳响应"""
+        if client_id:
+            with self.clients_lock:
+                if client_id in self.clients:
+                    self.clients[client_id]['last_seen'] = time.time()
+                    self.logger.debug(f"收到客户端 {client_id} 的心跳响应")
+
+    def handle_ping_request(self, message: Dict[str, Any], client_sock: socket.socket, client_id: str):
+        """处理ping请求"""
+        # 更新客户端最后活动时间
+        if client_id:
+            with self.clients_lock:
+                if client_id in self.clients:
+                    self.clients[client_id]['last_seen'] = time.time()
+        
+        # 发送pong响应
+        pong_response = {
+            'type': 'pong',
+            'timestamp': time.time(),
+            'server_time': time.time(),
+            'original_timestamp': message.get('timestamp')
+        }
+        
+        try:
+            self.send_message(client_sock, pong_response)
+            self.logger.debug(f"向客户端 {client_id} 发送pong响应")
+        except Exception as e:
+            self.logger.error(f"发送pong响应失败: {e}")
+
     def process_control_message(self, message: Dict[str, Any], client_sock: socket.socket, addr: Tuple[str, int]):
         """处理控制消息"""
         cmd_type = message.get('type', 'unknown')
@@ -740,6 +995,9 @@ class CloudVoIPServer:
         print("  calls       - 显示活动通话")
         print("  broadcast <message> - 广播消息")
         print("  kick <client_id>    - 踢出客户端")
+        print("  cleanup     - 手动执行清理任务")
+        print("  heartbeat   - 发送心跳给所有客户端")
+        print("  config      - 显示/修改清理配置")
         print("  shutdown    - 关闭服务器")
         print("  help        - 显示帮助")
         print("=" * 60)
@@ -763,12 +1021,25 @@ class CloudVoIPServer:
                 elif cmd == 'clients':
                     with self.clients_lock:
                         print(f"\n连接的客户端 ({len(self.clients)}):")
+                        current_time = time.time()
                         for client_id, client_info in self.clients.items():
                             name = client_info.get('name', client_id)
                             addr = client_info['addr']
                             status = client_info['status']
-                            last_seen = datetime.fromtimestamp(client_info['last_seen']).strftime('%H:%M:%S')
-                            print(f"  - {name} ({client_id}) [{status}] {addr} (最后活动: {last_seen})")
+                            last_seen = client_info['last_seen']
+                            last_seen_str = datetime.fromtimestamp(last_seen).strftime('%H:%M:%S')
+                            
+                            # 计算超时倒计时
+                            time_since_last_seen = current_time - last_seen
+                            timeout_in = self.client_timeout - time_since_last_seen
+                            
+                            if timeout_in > 0:
+                                timeout_str = f"超时倒计时: {timeout_in:.0f}s"
+                            else:
+                                timeout_str = "即将超时"
+                            
+                            print(f"  - {name} ({client_id}) [{status}] {addr}")
+                            print(f"    最后活动: {last_seen_str}, {timeout_str}")
                 elif cmd == 'rooms':
                     with self.rooms_lock:
                         print(f"\n活动房间 ({len(self.rooms)}):")
@@ -813,6 +1084,42 @@ class CloudVoIPServer:
                                 print(f"踢出客户端失败: {client_id}")
                         else:
                             print(f"客户端 {client_id} 不存在")
+                elif cmd == 'cleanup':
+                    print("执行手动清理任务...")
+                    self.cleanup_inactive_clients()
+                    self.cleanup_expired_calls()
+                    self.cleanup_empty_rooms()
+                    print("清理任务完成")
+                elif cmd == 'heartbeat':
+                    print("发送心跳给所有客户端...")
+                    self.send_heartbeat_requests()
+                    print("心跳发送完成")
+                elif cmd == 'config':
+                    if args:
+                        # 解析配置参数
+                        config_parts = args.split('=', 1)
+                        if len(config_parts) == 2:
+                            key, value = config_parts
+                            key = key.strip()
+                            try:
+                                value = int(value.strip())
+                                if key == 'timeout':
+                                    self.client_timeout = value
+                                    print(f"客户端超时时间设置为: {value} 秒")
+                                elif key == 'interval':
+                                    self.heartbeat_interval = value
+                                    print(f"心跳检查间隔设置为: {value} 秒")
+                                else:
+                                    print(f"未知配置项: {key}")
+                            except ValueError:
+                                print("配置值必须为整数")
+                        else:
+                            print("配置格式: config <key>=<value>")
+                            print("可用配置项: timeout (客户端超时时间), interval (心跳间隔)")
+                    else:
+                        print(f"当前配置:")
+                        print(f"  客户端超时时间: {self.client_timeout} 秒")
+                        print(f"  心跳检查间隔: {self.heartbeat_interval} 秒")
                 elif cmd == 'help':
                     print("\n可用命令:")
                     print("  status      - 显示服务器状态")
@@ -821,6 +1128,9 @@ class CloudVoIPServer:
                     print("  calls       - 显示活动通话")
                     print("  broadcast <message> - 广播消息")
                     print("  kick <client_id>    - 踢出客户端")
+                    print("  cleanup     - 手动执行清理任务")
+                    print("  heartbeat   - 发送心跳给所有客户端")
+                    print("  config      - 显示/修改清理配置")
                     print("  shutdown    - 关闭服务器")
                     print("  help        - 显示帮助")
                 else:

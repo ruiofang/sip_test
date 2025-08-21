@@ -109,15 +109,17 @@ class VoIPClientLauncher:
     
     def print_menu(self):
         """打印主菜单"""
-        print("\n📋 功能菜单:")
-        print("1. 🚀 快速连接服务器")
-        print("2. 🔧 服务器管理")
-        print("3. 🧪 连接测试")
-        print("4. 🎵 音频测试")
-        print("5. ⚙️  配置管理")
-        print("6. 📖 使用帮助")
-        print("7. ❌ 退出程序")
-        print("-" * 60)
+        print("🎯 功能菜单:")
+        print("-" * 30)
+        print("1. 🚀 快速连接")
+        print("2. � 自动循环连接")
+        print("3. �🔧 服务器管理")
+        print("4. 🧪 连接测试")
+        print("5. 🎵 音频测试")
+        print("6. ⚙️ 配置管理")
+        print("7. 📖 帮助说明")
+        print("8. 👋 退出程序")
+        print("-" * 30)
     
     def quick_connect(self):
         """快速连接服务器"""
@@ -229,14 +231,17 @@ class VoIPClientLauncher:
                 self.save_config()
                 self.connect_to_server(ip, port)
     
-    def connect_to_server(self, server_ip: str, port: int):
+    def connect_to_server(self, server_ip: str, port: int, auto_loop: bool = False):
         """连接到服务器"""
         print(f"\n🔌 连接到服务器 {server_ip}:{port}")
         
         # 获取用户名
         default_name = self.config["user"]["default_name"]
-        user_name = input(f"用户名 (默认: {default_name}): ").strip()
-        if not user_name:
+        if not auto_loop:
+            user_name = input(f"用户名 (默认: {default_name}): ").strip()
+            if not user_name:
+                user_name = default_name
+        else:
             user_name = default_name
         
         # 更新配置
@@ -258,9 +263,18 @@ class VoIPClientLauncher:
         if port != 5060:
             cmd.extend(["--port", str(port)])
         
+        if auto_loop:
+            cmd.append("--auto-reconnect")
+        
         print(f"🚀 启动客户端: {user_name}")
-        print("💡 按 Ctrl+C 可以退出客户端")
-        input("按回车键开始连接...")
+        if auto_loop:
+            print("🔄 自动循环模式已启用")
+            print("💡 客户端将自动重连，按 Ctrl+C 可以完全退出")
+        else:
+            print("💡 按 Ctrl+C 可以退出客户端")
+        
+        if not auto_loop:
+            input("按回车键开始连接...")
         
         try:
             # 启动客户端
@@ -272,6 +286,70 @@ class VoIPClientLauncher:
         except Exception as e:
             print(f"❌ 启动客户端失败: {e}")
         
+        if not auto_loop:
+            input("按回车键返回菜单...")
+    
+    def auto_loop_connect(self):
+        """自动循环连接模式"""
+        print("\n🔄 自动循环连接模式")
+        print("-" * 40)
+        print("在此模式下，客户端将：")
+        print("✅ 自动连接到最后使用的服务器")
+        print("✅ 连接断开后自动重连")
+        print("✅ 无需手动确认操作")
+        print("⚠️  按 Ctrl+C 可以完全退出")
+        print("-" * 40)
+        
+        # 获取最后使用的服务器
+        last_server_key = self.config["user"]["last_server"]
+        if last_server_key not in self.config["servers"]:
+            print("❌ 没有找到可用的服务器配置")
+            input("按回车键返回菜单...")
+            return
+        
+        server_info = self.config["servers"][last_server_key]
+        print(f"🎯 目标服务器: {server_info['name']} ({server_info['ip']}:{server_info['port']})")
+        
+        # 询问是否开始
+        confirm = input("\n是否开始自动循环连接? (Y/n): ").strip().lower()
+        if confirm in ['n', 'no']:
+            return
+        
+        print(f"\n🚀 开始自动循环连接...")
+        print("💡 提示: 按 Ctrl+C 可随时退出")
+        
+        retry_count = 0
+        max_retries = 999  # 几乎无限重试
+        
+        while retry_count < max_retries:
+            try:
+                if retry_count > 0:
+                    print(f"\n🔄 第 {retry_count + 1} 次连接尝试...")
+                    time.sleep(3)  # 重连前等待3秒
+                
+                self.connect_to_server(
+                    server_info["ip"], 
+                    server_info["port"], 
+                    auto_loop=True
+                )
+                
+                retry_count += 1
+                
+            except KeyboardInterrupt:
+                print(f"\n\n🛑 用户中断循环连接")
+                break
+            except Exception as e:
+                print(f"\n❌ 连接异常: {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    print(f"⏰ 3秒后进行第 {retry_count + 1} 次重连...")
+                    try:
+                        time.sleep(3)
+                    except KeyboardInterrupt:
+                        print(f"\n🛑 用户中断循环连接")
+                        break
+        
+        print(f"\n📞 自动循环连接已结束")
         input("按回车键返回菜单...")
     
     def server_management(self):
@@ -704,25 +782,27 @@ class VoIPClientLauncher:
                 self.print_header()
                 self.print_menu()
                 
-                choice = input("请选择功能 (1-7): ").strip()
+                choice = input("请选择功能 (1-8): ").strip()
                 
                 if choice == "1":
                     self.quick_connect()
                 elif choice == "2":
-                    self.server_management()
+                    self.auto_loop_connect()
                 elif choice == "3":
-                    self.connection_test()
+                    self.server_management()
                 elif choice == "4":
-                    self.audio_test()
+                    self.connection_test()
                 elif choice == "5":
-                    self.config_management()
+                    self.audio_test()
                 elif choice == "6":
-                    self.show_help()
+                    self.config_management()
                 elif choice == "7":
+                    self.show_help()
+                elif choice == "8":
                     print("\n👋 感谢使用VoIP语音通话系统!")
                     break
                 else:
-                    print("❌ 无效选择，请输入1-7之间的数字")
+                    print("❌ 无效选择，请输入1-8之间的数字")
                     input("按回车键继续...")
         
         except KeyboardInterrupt:
