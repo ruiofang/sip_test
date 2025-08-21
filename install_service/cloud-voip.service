@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloud VoIP Server
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+User=root
+WorkingDirectory=/home/ruio/sip_test
+ExecStart=/usr/bin/python3 /home/ruio/sip_test/cloud_voip_server.py --daemon
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

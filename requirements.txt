@@ -1,0 +1,7 @@
+PyAudio==0.2.14
+# VoIP语音通话系统依赖包
+
+# 可选依赖（用于扩展功能）
+# requests>=2.25.1  # HTTP请求支持
+# flask>=2.0.0      # Web管理界面
+# websockets>=10.0  # WebSocket支持

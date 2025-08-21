@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "default": {
+      "name": "默认服务器",
+      "ip": "120.27.145.121",
+      "port": 5060
+    },
+    "local": {
+      "name": "本地测试服务器",
+      "ip": "127.0.0.1",
+      "port": 5060
+    }
+  },
+  "user": {
+    "default_name": "u1",
+    "last_server": "default"
+  }
+}
