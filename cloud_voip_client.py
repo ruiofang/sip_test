@@ -186,20 +186,15 @@ class CloudVoIPClient:
 
     def message_receive_thread(self):
         """消息接收线程"""
-        print(f"🔍 [DEBUG] 消息接收线程启动")
         while self.running and self.connected:
             try:
-                print(f"🔍 [DEBUG] 等待接收消息...")
                 # 接收消息长度
                 length_data = self.message_socket.recv(4)
                 if not length_data:
-                    print(f"🔍 [DEBUG] 收到空的长度数据，连接可能关闭")
                     break
                 
                 msg_length = struct.unpack('I', length_data)[0]
-                print(f"🔍 [DEBUG] 收到消息长度: {msg_length}")
                 if msg_length > 1024 * 1024:  # 1MB限制
-                    print(f"🔍 [DEBUG] 消息长度过大: {msg_length}")
                     break
                 
                 # 接收完整消息
@@ -207,30 +202,22 @@ class CloudVoIPClient:
                 while len(data) < msg_length:
                     chunk = self.message_socket.recv(min(msg_length - len(data), 4096))
                     if not chunk:
-                        print(f"🔍 [DEBUG] 收到空的数据块，连接可能关闭")
                         break
                     data += chunk
                 
                 if len(data) != msg_length:
-                    print(f"🔍 [DEBUG] 数据长度不匹配: 期望 {msg_length}, 实际 {len(data)}")
                     break
-                
-                print(f"🔍 [DEBUG] 成功接收完整消息，长度: {len(data)}")
                 
                 # 解析并处理消息
                 try:
                     message = json.loads(data.decode('utf-8'))
-                    print(f"🔍 [DEBUG] 成功解析消息，准备处理...")
                     self.handle_server_message(message)
                 except json.JSONDecodeError as e:
-                    print(f"🔍 [DEBUG] JSON解析失败: {e}")
-                    print(f"🔍 [DEBUG] 原始数据: {data}")
                     pass
                     
             except Exception as e:
                 if self.running:
                     print(f"接收消息错误: {e}")
-                    print(f"🔍 [DEBUG] 详细错误: {e}")
                 break
         
         self.connected = False
@@ -239,7 +226,6 @@ class CloudVoIPClient:
     def handle_server_message(self, message: Dict[str, Any]):
         """处理服务器消息"""
         msg_type = message.get('type', 'unknown')
-        print(f"🔍 [DEBUG] 收到服务器消息: {msg_type}")
         
         if msg_type == 'register_response':
             self.handle_register_response(message)
@@ -254,11 +240,9 @@ class CloudVoIPClient:
         elif msg_type == 'call_hangup':
             self.handle_call_hangup(message)
         elif msg_type == 'client_list':
-            print(f"🔍 [DEBUG] 准备处理客户端列表消息")
             self.handle_client_list(message)
         else:
             print(f"收到未知消息类型: {msg_type}")
-            print(f"🔍 [DEBUG] 完整消息内容: {message}")
 
     def handle_register_response(self, message: Dict[str, Any]):
         """处理注册响应"""
@@ -294,7 +278,6 @@ class CloudVoIPClient:
         caller = message.get('from')
         
         print(f"\n📞 收到来自 {caller} 的通话请求 (通话ID: {call_id})")
-        print(f"💡 输入 'accept {call_id}' 接受通话，或 'reject {call_id}' 拒绝通话")
         
         # 存储待处理的通话请求
         if not hasattr(self, 'pending_calls'):
@@ -304,6 +287,9 @@ class CloudVoIPClient:
             'caller': caller,
             'timestamp': time.time()
         }
+        
+        # 立即显示选项界面
+        self.show_call_options(call_id, caller)
 
     def handle_call_answer(self, message: Dict[str, Any]):
         """处理通话应答"""
@@ -335,11 +321,54 @@ class CloudVoIPClient:
         
         self.stop_audio_streams()
 
+    def show_call_options(self, call_id: str, caller: str):
+        """显示通话选项界面"""
+        # 在单独线程中处理用户输入，避免阻塞消息接收
+        def handle_call_input():
+            print(f"\n{'='*50}")
+            print(f"📞 来自 {caller} 的通话请求")
+            print(f"通话ID: {call_id}")
+            print(f"{'='*50}")
+            print("请选择操作:")
+            print("  1. 接受通话")
+            print("  2. 拒绝通话")
+            print(f"{'='*50}")
+            
+            # 设置30秒超时自动拒绝
+            timeout = 30
+            print(f"⏰ 请在 {timeout} 秒内选择，否则自动拒绝通话")
+            
+            start_time = time.time()
+            while call_id in getattr(self, 'pending_calls', {}):
+                try:
+                    # 检查超时
+                    if time.time() - start_time > timeout:
+                        print(f"\n⏰ 超时未响应，自动拒绝来自 {caller} 的通话")
+                        self.reject_call(call_id)
+                        break
+                    
+                    choice = input("请输入选项 (1/2): ").strip()
+                    
+                    if choice == '1':
+                        self.accept_call(call_id)
+                        break
+                    elif choice == '2':
+                        self.reject_call(call_id)
+                        break
+                    else:
+                        print("❌ 无效选项，请输入 1 或 2")
+                except (EOFError, KeyboardInterrupt):
+                    print(f"\n❌ 操作被取消，自动拒绝来自 {caller} 的通话")
+                    self.reject_call(call_id)
+                    break
+        
+        # 在单独线程中处理
+        input_thread = threading.Thread(target=handle_call_input, daemon=True)
+        input_thread.start()
+
     def handle_client_list(self, message: Dict[str, Any]):
         """处理客户端列表"""
-        print(f"📋 收到客户端列表响应")
         clients = message.get('clients', [])
-        print(f"🔢 服务器返回 {len(clients)} 个客户端")
         
         with self.clients_lock:
             self.online_clients = {}
@@ -359,9 +388,8 @@ class CloudVoIPClient:
             'type': 'get_clients',
             'timestamp': time.time()
         }
-        print(f"🔍 正在请求客户端列表...")
         success = self.send_message(message)
-        print(f"📤 发送客户端列表请求: {'成功' if success else '失败'}")
+        return success
 
     def send_broadcast(self, content: str):
         """发送广播消息"""
@@ -540,7 +568,6 @@ class CloudVoIPClient:
 
     def audio_send_loop(self):
         """音频发送循环"""
-        print("🎵 [DEBUG] 音频发送循环开始")
         while self.current_call and self.audio_input:
             try:
                 # 读取音频数据
@@ -559,11 +586,8 @@ class CloudVoIPClient:
                         # 发送到服务器
                         try:
                             self.audio_socket.sendto(packet, (self.server_ip, self.audio_port))
-                            print(f"🔊 [DEBUG] 发送音频数据: {len(data)} 字节到 {target_id}")
                         except Exception as send_e:
                             print(f"音频发送失败: {send_e}")
-                    else:
-                        print(f"🔊 [DEBUG] 没有找到目标客户端ID，当前通话信息: {self.current_call}")
                 else:
                     time.sleep(0.01)  # 避免过度消耗CPU
                     
@@ -571,11 +595,9 @@ class CloudVoIPClient:
                 if self.current_call:
                     print(f"音频发送错误: {e}")
                 break
-        print("🎵 [DEBUG] 音频发送循环结束")
 
     def audio_receive_loop(self):
         """音频接收循环"""
-        print("🎵 [DEBUG] 音频接收循环开始")
         # 设置更长的超时，避免过度阻塞
         if self.audio_socket:
             self.audio_socket.settimeout(1.0)  # 增加到1秒
@@ -586,7 +608,6 @@ class CloudVoIPClient:
                 if self.audio_socket:
                     try:
                         data, addr = self.audio_socket.recvfrom(4096)
-                        print(f"🔊 [DEBUG] 接收音频数据: {len(data)} 字节 from {addr}")
                         
                         # 解析包头，提取音频数据
                         if len(data) > 32:  # 32字节包头（16字节源ID + 16字节目标ID）
@@ -595,9 +616,6 @@ class CloudVoIPClient:
                             # 播放音频数据
                             if len(audio_data) > 0:
                                 self.audio_output.write(audio_data)
-                                print(f"🔊 [DEBUG] 播放音频数据: {len(audio_data)} 字节")
-                        else:
-                            print(f"🔊 [DEBUG] 收到短音频包: {len(data)} 字节")
                     except socket.timeout:
                         # 正常超时，继续循环
                         continue
@@ -612,21 +630,17 @@ class CloudVoIPClient:
                 if self.current_call:
                     print(f"音频接收错误: {e}")
                 break
-        print("🎵 [DEBUG] 音频接收循环结束")
 
     def show_clients(self):
         """显示在线客户端"""
         # 清除之前的事件状态
         self.client_list_event.clear()
-        print("🔄 清除之前的客户端列表事件")
         
         # 请求客户端列表
         self.request_client_list()
         
         # 等待服务器响应（最多等待3秒）
-        print("⏳ 等待服务器响应（最多3秒）...")
         if self.client_list_event.wait(timeout=3.0):
-            print("✅ 收到服务器响应")
             with self.clients_lock:
                 if self.online_clients:
                     print(f"\n在线客户端 ({len(self.online_clients)}):")
@@ -646,15 +660,14 @@ class CloudVoIPClient:
         print("=" * 60)
         print("可用命令:")
         print("  clients                    - 显示在线客户端")
-        print("  call                       - 发起通话 (选择式)")
-        print("  accept <call_id>           - 接受通话")
-        print("  reject <call_id>           - 拒绝通话")
-        print("  hangup                     - 挂断通话")
-        print("  broadcast                  - 发送广播消息 (选择式)")
-        print("  private                    - 发送私聊消息 (选择式)")
+        print("  call                       - 发起通话 (交互选择)")
+        print("  hangup                     - 挂断通话 (交互确认)")
+        print("  broadcast                  - 发送广播消息 (交互输入)")
+        print("  private                    - 发送私聊消息 (交互选择)")
         print("  status                     - 显示客户端状态")
         print("  quit                       - 退出客户端")
         print("  help                       - 显示帮助")
+        print("💡 提示: 收到通话请求时会自动显示接受/拒绝选项")
         print("=" * 60)
         
         while self.running and self.connected:
@@ -680,7 +693,7 @@ class CloudVoIPClient:
                         # 新的选择式方式
                         self.interactive_call()
                 elif cmd == 'hangup':
-                    self.hangup_call()
+                    self.interactive_hangup()
                 elif cmd == 'accept' and len(parts) > 1:
                     call_id = parts[1]
                     self.accept_call(call_id)
@@ -721,16 +734,14 @@ class CloudVoIPClient:
                 elif cmd == 'help':
                     print("\n可用命令:")
                     print("  clients                    - 显示在线客户端")
-                    print("  call                       - 发起通话 (选择式)")
-                    print("  accept <call_id>           - 接受通话")
-                    print("  reject <call_id>           - 拒绝通话")
-                    print("  hangup                     - 挂断通话")
-                    print("  broadcast                  - 发送广播消息 (选择式)")
-                    print("  private                    - 发送私聊消息 (选择式)")
+                    print("  call                       - 发起通话 (交互选择)")
+                    print("  hangup                     - 挂断通话 (交互确认)")
+                    print("  broadcast                  - 发送广播消息 (交互输入)")
+                    print("  private                    - 发送私聊消息 (交互选择)")
                     print("  status                     - 显示客户端状态")
                     print("  quit                       - 退出客户端")
                     print("  help                       - 显示帮助")
-                    print("\n💡 提示: 现在支持选择式操作，直接输入命令即可选择目标！")
+                    print("\n💡 提示: 收到通话请求时会自动显示接受/拒绝选项，无需记忆复杂命令！")
                 else:
                     print(f"未知命令: {cmd}. 输入 'help' 查看可用命令")
                     
@@ -783,6 +794,39 @@ class CloudVoIPClient:
                 print("❌ 请输入有效数字")
             except KeyboardInterrupt:
                 print("\n已取消通话")
+
+    def interactive_hangup(self):
+        """交互式挂断通话"""
+        with self.call_lock:
+            if not self.current_call:
+                print("❌ 当前没有进行中的通话")
+                return
+        
+        print(f"\n{'='*50}")
+        print(f"📞 正在与 {self.current_call['peer']} 通话中")
+        print(f"通话ID: {self.current_call['id']}")
+        print(f"{'='*50}")
+        print("确认要挂断通话吗？")
+        print("  1. 挂断通话")
+        print("  2. 继续通话")
+        print(f"{'='*50}")
+        
+        while True:
+            try:
+                choice = input("请输入选项 (1/2): ").strip()
+                
+                if choice == '1':
+                    self.hangup_call()
+                    print("📞 通话已结束")
+                    break
+                elif choice == '2':
+                    print("继续通话中...")
+                    break
+                else:
+                    print("❌ 无效选项，请输入 1 或 2")
+            except (EOFError, KeyboardInterrupt):
+                print("\n继续通话中...")
+                break
 
     def interactive_private_message(self):
         """交互式发送私聊消息"""
