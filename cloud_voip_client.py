@@ -28,6 +28,7 @@ import argparse
 import uuid
 import os
 import warnings
+import numpy as np
 from typing import Dict, Any, Optional, List
 
 # 抑制ALSA警告
@@ -93,10 +94,67 @@ class CloudVoIPClient:
         self.audio_input = None
         self.audio_output = None
         
+        # 啸叫抑制配置
+        self.echo_cancellation = True        # 回声消除
+        self.noise_suppression = True        # 噪声抑制
+        self.auto_gain_control = True        # 自动增益控制
+        self.voice_activity_detection = True # 语音活动检测
+        
+        # 音频处理参数
+        self.input_volume = 0.7              # 输入音量 (0.0-1.0)
+        self.output_volume = 0.8             # 输出音量 (0.0-1.0)
+        self.noise_gate_threshold = 0.01     # 噪声门限阈值
+        self.echo_delay_samples = 1024       # 回声延迟采样数
+        
+        # 音频缓冲和历史数据
+        self.audio_history = []              # 输出音频历史，用于回声消除
+        self.history_size = 10               # 保留历史帧数
+        self.silence_counter = 0             # 静音计数器
+        self.silence_threshold = 50          # 静音阈值（连续静音帧数）
+        
         # 线程锁
         self.clients_lock = threading.Lock()
         self.call_lock = threading.Lock()
         self.client_list_event = threading.Event()  # 用于客户端列表同步
+        
+        # 加载音频配置
+        self.load_audio_config()
+
+    def load_audio_config(self, config_file='audio_config.json'):
+        """加载音频配置"""
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), config_file)
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    
+                audio_settings = config.get('audio_settings', {})
+                
+                # 更新配置
+                self.echo_cancellation = audio_settings.get('echo_cancellation', self.echo_cancellation)
+                self.noise_suppression = audio_settings.get('noise_suppression', self.noise_suppression)
+                self.auto_gain_control = audio_settings.get('auto_gain_control', self.auto_gain_control)
+                self.voice_activity_detection = audio_settings.get('voice_activity_detection', self.voice_activity_detection)
+                self.input_volume = audio_settings.get('input_volume', self.input_volume)
+                self.output_volume = audio_settings.get('output_volume', self.output_volume)
+                self.noise_gate_threshold = audio_settings.get('noise_gate_threshold', self.noise_gate_threshold)
+                self.echo_delay_samples = audio_settings.get('echo_delay_samples', self.echo_delay_samples)
+                self.history_size = audio_settings.get('history_size', self.history_size)
+                self.silence_threshold = audio_settings.get('silence_threshold', self.silence_threshold)
+                
+                # 高级设置
+                advanced_settings = config.get('advanced_settings', {})
+                if advanced_settings.get('chunk_size'):
+                    self.chunk = advanced_settings['chunk_size']
+                if advanced_settings.get('sample_rate'):
+                    self.rate = advanced_settings['sample_rate']
+                
+                print(f"✅ 已加载音频配置: {config_file}")
+            else:
+                print(f"⚠️ 音频配置文件不存在: {config_file}，使用默认配置")
+                
+        except Exception as e:
+            print(f"❌ 加载音频配置失败: {e}，使用默认配置")
 
     def connect(self) -> bool:
         """连接到服务器"""
@@ -501,23 +559,42 @@ class CloudVoIPClient:
             return
         
         try:
-            # 启动音频输入流（麦克风）
+            # 启动音频输入流（麦克风）- 添加更多配置以减少延迟
             self.audio_input = self.audio_instance.open(
                 format=self.audio_format,
                 channels=self.channels,
                 rate=self.rate,
                 input=True,
-                frames_per_buffer=self.chunk
+                frames_per_buffer=self.chunk,
+                input_device_index=None,  # 使用默认输入设备
+                # 添加低延迟配置
+                stream_callback=None,
+                start=False
             )
             
-            # 启动音频输出流（扬声器）
+            # 启动音频输出流（扬声器）- 添加更多配置以减少延迟
             self.audio_output = self.audio_instance.open(
                 format=self.audio_format,
                 channels=self.channels,
                 rate=self.rate,
                 output=True,
-                frames_per_buffer=self.chunk
+                frames_per_buffer=self.chunk,
+                output_device_index=None,  # 使用默认输出设备
+                # 添加低延迟配置
+                stream_callback=None,
+                start=False
             )
+            
+            # 初始化音频处理
+            self.audio_processing_init()
+            
+            # 清除音频历史
+            self.audio_history = []
+            self.silence_counter = 0
+            
+            # 启动音频流
+            self.audio_input.start_stream()
+            self.audio_output.start_stream()
             
             # 启动音频线程
             self.audio_send_thread = threading.Thread(target=self.audio_send_loop)
@@ -529,6 +606,14 @@ class CloudVoIPClient:
             self.audio_receive_thread.start()
             
             print("🎵 音频流已启动")
+            if self.echo_cancellation:
+                print("🔇 回声消除: 启用")
+            if self.noise_suppression:
+                print("🔇 噪声抑制: 启用")
+            if self.auto_gain_control:
+                print("🔊 自动增益控制: 启用")
+            if self.voice_activity_detection:
+                print("🗣️ 语音活动检测: 启用")
             
         except Exception as e:
             print(f"启动音频流失败: {e}")
@@ -551,12 +636,207 @@ class CloudVoIPClient:
         except Exception as e:
             print(f"停止音频流错误: {e}")
 
+    def audio_processing_init(self):
+        """初始化音频处理参数"""
+        try:
+            # 检查numpy是否可用
+            global np
+            if 'np' not in globals():
+                import numpy as np
+        except ImportError:
+            print("警告: numpy未安装，高级音频处理功能将受限")
+            return False
+        return True
+
+    def apply_noise_gate(self, audio_data):
+        """应用噪声门，抑制低于阈值的信号"""
+        if not hasattr(self, 'numpy_available'):
+            self.numpy_available = self.audio_processing_init()
+        
+        if not self.numpy_available:
+            return audio_data
+        
+        try:
+            # 将字节数据转换为numpy数组
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            
+            # 计算RMS音量
+            rms = np.sqrt(np.mean(samples**2))
+            
+            # 如果音量低于阈值，则静音
+            if rms < self.noise_gate_threshold:
+                samples = samples * 0.1  # 大幅衰减而不是完全静音
+                self.silence_counter += 1
+            else:
+                self.silence_counter = 0
+            
+            # 转换回字节数据
+            return (samples * 32767).astype(np.int16).tobytes()
+            
+        except Exception as e:
+            # 如果处理失败，返回原始数据
+            return audio_data
+
+    def apply_echo_cancellation(self, input_audio, reference_audio=None):
+        """简单的回声消除"""
+        if not hasattr(self, 'numpy_available'):
+            self.numpy_available = self.audio_processing_init()
+        
+        if not self.numpy_available or not reference_audio:
+            return input_audio
+        
+        try:
+            # 将音频数据转换为numpy数组
+            input_samples = np.frombuffer(input_audio, dtype=np.int16).astype(np.float32)
+            ref_samples = np.frombuffer(reference_audio, dtype=np.int16).astype(np.float32)
+            
+            # 简单的自适应滤波器（LMS算法的简化版本）
+            if len(input_samples) == len(ref_samples):
+                # 计算相关性
+                correlation = np.correlate(input_samples, ref_samples, mode='valid')
+                if len(correlation) > 0 and abs(correlation[0]) > 0.3 * len(input_samples):
+                    # 如果相关性高，减少输入信号强度
+                    input_samples = input_samples * 0.5
+            
+            return input_samples.astype(np.int16).tobytes()
+            
+        except Exception as e:
+            return input_audio
+
+    def apply_auto_gain_control(self, audio_data):
+        """自动增益控制，保持音量稳定"""
+        if not hasattr(self, 'numpy_available'):
+            self.numpy_available = self.audio_processing_init()
+        
+        if not self.numpy_available:
+            return audio_data
+        
+        try:
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+            
+            # 计算当前RMS
+            current_rms = np.sqrt(np.mean(samples**2))
+            target_rms = 3000.0  # 目标RMS值
+            
+            if current_rms > 0:
+                # 计算增益
+                gain = min(target_rms / current_rms, 2.0)  # 限制最大增益为2倍
+                gain = max(gain, 0.5)  # 限制最小增益为0.5倍
+                
+                # 应用增益
+                samples = samples * gain
+                
+                # 硬限制，防止溢出
+                samples = np.clip(samples, -32767, 32767)
+            
+            return samples.astype(np.int16).tobytes()
+            
+        except Exception as e:
+            return audio_data
+
+    def detect_voice_activity(self, audio_data):
+        """语音活动检测"""
+        if not hasattr(self, 'numpy_available'):
+            self.numpy_available = self.audio_processing_init()
+        
+        if not self.numpy_available:
+            return True  # 如果无法检测，假设有语音活动
+        
+        try:
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+            
+            # 计算能量
+            energy = np.sum(samples**2)
+            
+            # 计算过零率
+            zero_crossings = np.sum(np.diff(np.sign(samples)) != 0)
+            zero_crossing_rate = zero_crossings / len(samples)
+            
+            # 简单的VAD判断
+            energy_threshold = 1000000  # 能量阈值
+            zcr_threshold = 0.1         # 过零率阈值
+            
+            has_voice = energy > energy_threshold and zero_crossing_rate > zcr_threshold
+            
+            return has_voice
+            
+        except Exception as e:
+            return True
+
+    def process_input_audio(self, audio_data):
+        """处理输入音频数据"""
+        if not self.echo_cancellation and not self.noise_suppression and not self.auto_gain_control:
+            # 如果没有启用任何处理，只调整音量
+            return self.adjust_volume(audio_data, self.input_volume)
+        
+        processed_data = audio_data
+        
+        # 1. 噪声门
+        if self.noise_suppression:
+            processed_data = self.apply_noise_gate(processed_data)
+        
+        # 2. 回声消除
+        if self.echo_cancellation and len(self.audio_history) > 0:
+            # 使用最近的输出音频作为参考
+            reference = self.audio_history[-1] if self.audio_history else None
+            processed_data = self.apply_echo_cancellation(processed_data, reference)
+        
+        # 3. 自动增益控制
+        if self.auto_gain_control:
+            processed_data = self.apply_auto_gain_control(processed_data)
+        
+        # 4. 音量调整
+        processed_data = self.adjust_volume(processed_data, self.input_volume)
+        
+        return processed_data
+
+    def process_output_audio(self, audio_data):
+        """处理输出音频数据"""
+        # 调整输出音量
+        processed_data = self.adjust_volume(audio_data, self.output_volume)
+        
+        # 保存到历史记录用于回声消除
+        if self.echo_cancellation:
+            self.audio_history.append(processed_data)
+            if len(self.audio_history) > self.history_size:
+                self.audio_history.pop(0)
+        
+        return processed_data
+
+    def adjust_volume(self, audio_data, volume):
+        """调整音频音量"""
+        if volume == 1.0:
+            return audio_data
+        
+        if not hasattr(self, 'numpy_available'):
+            self.numpy_available = self.audio_processing_init()
+        
+        if not self.numpy_available:
+            return audio_data
+        
+        try:
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+            samples = samples * volume
+            samples = np.clip(samples, -32767, 32767)
+            return samples.astype(np.int16).tobytes()
+        except Exception as e:
+            return audio_data
+
     def audio_send_loop(self):
         """音频发送循环"""
         while self.current_call and self.audio_input:
             try:
                 # 读取音频数据
                 data = self.audio_input.read(self.chunk, exception_on_overflow=False)
+                
+                # 语音活动检测
+                if self.voice_activity_detection:
+                    if not self.detect_voice_activity(data):
+                        # 如果没有语音活动，发送静音或跳过发送
+                        continue
+                
+                # 音频处理
+                processed_data = self.process_input_audio(data)
                 
                 # 构造音频包
                 if self.audio_socket and self.current_call:
@@ -566,7 +846,7 @@ class CloudVoIPClient:
                         # 构造包头：源客户端ID + 目标客户端ID
                         header = self.client_id.encode('utf-8').ljust(16, b'\x00')  # 16字节源ID
                         header += target_id.encode('utf-8').ljust(16, b'\x00')      # 16字节目标ID
-                        packet = header + data
+                        packet = header + processed_data
                         
                         # 发送到服务器
                         try:
@@ -598,12 +878,14 @@ class CloudVoIPClient:
                         if len(data) > 32:  # 32字节包头（16字节源ID + 16字节目标ID）
                             audio_data = data[32:]
                             
-                            # 播放音频数据
+                            # 处理接收到的音频数据
                             if len(audio_data) > 0:
-                                self.audio_output.write(audio_data)
+                                processed_audio = self.process_output_audio(audio_data)
+                                
+                                # 播放音频数据
+                                self.audio_output.write(processed_audio)
                     except socket.timeout:
                         # 正常超时，继续循环
-                        continue
                         continue
                     except Exception as recv_e:
                         print(f"音频接收异常: {recv_e}")
@@ -650,6 +932,7 @@ class CloudVoIPClient:
         print("  broadcast                  - 发送广播消息 (交互输入)")
         print("  private                    - 发送私聊消息 (交互选择)")
         print("  status                     - 显示客户端状态")
+        print("  audio                      - 音频设置")
         print("  quit                       - 退出客户端")
         print("  help                       - 显示帮助")
         print("🤖 提示: 已开启自动接听模式，来电将自动接受")
@@ -717,6 +1000,8 @@ class CloudVoIPClient:
                     print(f"  连接状态: {'已连接' if self.connected else '未连接'}")
                     print(f"  通话状态: {call_status}")
                     print(f"  在线客户端数量: {len(self.online_clients)}")
+                elif cmd == 'audio':
+                    self.audio_settings_menu()
                 elif cmd == 'help':
                     print("\n可用命令:")
                     print("  clients                    - 显示在线客户端")
@@ -725,6 +1010,7 @@ class CloudVoIPClient:
                     print("  broadcast                  - 发送广播消息 (交互输入)")
                     print("  private                    - 发送私聊消息 (交互选择)")
                     print("  status                     - 显示客户端状态")
+                    print("  audio                      - 音频设置")
                     print("  quit                       - 退出客户端")
                     print("  help                       - 显示帮助")
                     print("\n🤖 提示: 已开启自动接听模式，来电将自动接受！")
@@ -865,6 +1151,129 @@ class CloudVoIPClient:
                 print("❌ 请输入有效数字")
             except KeyboardInterrupt:
                 print("\n已取消发送")
+
+    def audio_settings_menu(self):
+        """音频设置菜单"""
+        while True:
+            print(f"\n{'='*60}")
+            print("🔊 音频设置")
+            print(f"{'='*60}")
+            
+            # 显示当前设置
+            print("当前设置:")
+            print(f"  1. 回声消除:     {'✅ 启用' if self.echo_cancellation else '❌ 禁用'}")
+            print(f"  2. 噪声抑制:     {'✅ 启用' if self.noise_suppression else '❌ 禁用'}")
+            print(f"  3. 自动增益控制: {'✅ 启用' if self.auto_gain_control else '❌ 禁用'}")
+            print(f"  4. 语音活动检测: {'✅ 启用' if self.voice_activity_detection else '❌ 禁用'}")
+            print(f"  5. 输入音量:     {self.input_volume:.1f}")
+            print(f"  6. 输出音量:     {self.output_volume:.1f}")
+            print(f"  7. 噪声门阈值:   {self.noise_gate_threshold:.3f}")
+            print("  8. 重置为默认设置")
+            print("  9. 保存当前设置")
+            print("  0. 返回主菜单")
+            print(f"{'='*60}")
+            
+            try:
+                choice = input("请选择 (0-9): ").strip()
+                
+                if choice == '0':
+                    break
+                elif choice == '1':
+                    self.echo_cancellation = not self.echo_cancellation
+                    print(f"回声消除已{'启用' if self.echo_cancellation else '禁用'}")
+                elif choice == '2':
+                    self.noise_suppression = not self.noise_suppression
+                    print(f"噪声抑制已{'启用' if self.noise_suppression else '禁用'}")
+                elif choice == '3':
+                    self.auto_gain_control = not self.auto_gain_control
+                    print(f"自动增益控制已{'启用' if self.auto_gain_control else '禁用'}")
+                elif choice == '4':
+                    self.voice_activity_detection = not self.voice_activity_detection
+                    print(f"语音活动检测已{'启用' if self.voice_activity_detection else '禁用'}")
+                elif choice == '5':
+                    try:
+                        new_volume = float(input(f"输入新的输入音量 (0.0-1.0, 当前: {self.input_volume}): "))
+                        if 0.0 <= new_volume <= 1.0:
+                            self.input_volume = new_volume
+                            print(f"输入音量设置为: {new_volume}")
+                        else:
+                            print("❌ 音量值必须在0.0-1.0之间")
+                    except ValueError:
+                        print("❌ 请输入有效数字")
+                elif choice == '6':
+                    try:
+                        new_volume = float(input(f"输入新的输出音量 (0.0-1.0, 当前: {self.output_volume}): "))
+                        if 0.0 <= new_volume <= 1.0:
+                            self.output_volume = new_volume
+                            print(f"输出音量设置为: {new_volume}")
+                        else:
+                            print("❌ 音量值必须在0.0-1.0之间")
+                    except ValueError:
+                        print("❌ 请输入有效数字")
+                elif choice == '7':
+                    try:
+                        new_threshold = float(input(f"输入新的噪声门阈值 (0.0-1.0, 当前: {self.noise_gate_threshold}): "))
+                        if 0.0 <= new_threshold <= 1.0:
+                            self.noise_gate_threshold = new_threshold
+                            print(f"噪声门阈值设置为: {new_threshold}")
+                        else:
+                            print("❌ 阈值必须在0.0-1.0之间")
+                    except ValueError:
+                        print("❌ 请输入有效数字")
+                elif choice == '8':
+                    self.reset_audio_defaults()
+                    print("✅ 音频设置已重置为默认值")
+                elif choice == '9':
+                    self.save_audio_config()
+                else:
+                    print("❌ 无效选择")
+                    
+            except KeyboardInterrupt:
+                print("\n返回主菜单")
+                break
+
+    def reset_audio_defaults(self):
+        """重置音频设置为默认值"""
+        self.echo_cancellation = True
+        self.noise_suppression = True
+        self.auto_gain_control = True
+        self.voice_activity_detection = True
+        self.input_volume = 0.7
+        self.output_volume = 0.8
+        self.noise_gate_threshold = 0.01
+
+    def save_audio_config(self, config_file='audio_config.json'):
+        """保存当前音频配置"""
+        try:
+            config = {
+                "audio_settings": {
+                    "echo_cancellation": self.echo_cancellation,
+                    "noise_suppression": self.noise_suppression,
+                    "auto_gain_control": self.auto_gain_control,
+                    "voice_activity_detection": self.voice_activity_detection,
+                    "input_volume": self.input_volume,
+                    "output_volume": self.output_volume,
+                    "noise_gate_threshold": self.noise_gate_threshold,
+                    "echo_delay_samples": self.echo_delay_samples,
+                    "history_size": self.history_size,
+                    "silence_threshold": self.silence_threshold
+                },
+                "advanced_settings": {
+                    "chunk_size": self.chunk,
+                    "sample_rate": self.rate,
+                    "channels": self.channels,
+                    "format": "paInt16"
+                }
+            }
+            
+            config_path = os.path.join(os.path.dirname(__file__), config_file)
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            
+            print(f"✅ 音频配置已保存到: {config_file}")
+            
+        except Exception as e:
+            print(f"❌ 保存配置失败: {e}")
 
     def interactive_broadcast(self):
         """交互式发送广播消息"""

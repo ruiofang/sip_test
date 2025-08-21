@@ -1,0 +1,38 @@
+{
+  "audio_settings": {
+    "echo_cancellation": true,
+    "noise_suppression": true,
+    "auto_gain_control": true,
+    "voice_activity_detection": true,
+    "input_volume": 0.7,
+    "output_volume": 0.8,
+    "noise_gate_threshold": 0.01,
+    "echo_delay_samples": 1024,
+    "history_size": 10,
+    "silence_threshold": 50,
+    "energy_threshold": 1000000,
+    "zero_crossing_threshold": 0.1,
+    "target_rms": 3000.0,
+    "max_gain": 2.0,
+    "min_gain": 0.5
+  },
+  "advanced_settings": {
+    "chunk_size": 1024,
+    "sample_rate": 16000,
+    "channels": 1,
+    "format": "paInt16",
+    "low_latency_mode": true,
+    "audio_buffer_size": 4096
+  },
+  "description": {
+    "echo_cancellation": "回声消除 - 减少扬声器声音被麦克风捕获",
+    "noise_suppression": "噪声抑制 - 使用噪声门减少背景噪音",
+    "auto_gain_control": "自动增益控制 - 保持音量稳定",
+    "voice_activity_detection": "语音活动检测 - 只在有语音时发送音频",
+    "input_volume": "输入音量 (0.0-1.0)",
+    "output_volume": "输出音量 (0.0-1.0)",
+    "noise_gate_threshold": "噪声门阈值 - 低于此值的信号将被衰减",
+    "energy_threshold": "语音检测能量阈值",
+    "target_rms": "AGC目标RMS值"
+  }
+}
