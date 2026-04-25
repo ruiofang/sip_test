@@ -1497,33 +1497,42 @@ class CloudVoIPClient:
                 target_id = clients_list[choice_num - 1][0]
                 target_name = clients_list[choice_num - 1][1].get('name', target_id)
 
-                print(f"\n已进入与 {target_name} 的私聊。")
+                print(f"\n💬 已进入与 {target_name} 的对话")
+                print("   直接输入消息回车发送；命令: /switch 更换对象, /quit 退出私聊")
+                print("-" * 40)
 
+                switch_target = False
                 while True:
-                    print(f"\n私聊对象: {target_name}")
-                    print("  1. 发送消息")
-                    print("  2. 更换私聊对象")
-                    print("  0. 退出私聊")
-                    action = input("请选择操作 (0-2): ").strip()
-
-                    if action == '0':
-                        print("已退出私聊")
+                    try:
+                        message = input(f"[发送给 {target_name}] > ").strip()
+                    except EOFError:
+                        print("\n已退出私聊")
                         return
-                    if action == '2':
-                        break
-                    if action != '1':
-                        print("❌ 无效选择")
+
+                    if not message:
                         continue
 
-                    message = input(f"请输入要发送给 {target_name} 的消息: ").strip()
-                    if not message:
-                        print("❌ 消息不能为空")
+                    cmd = message.lower()
+                    if cmd in ('/quit', '/exit', '/q'):
+                        print("已退出私聊")
+                        return
+                    if cmd in ('/switch', '/s'):
+                        switch_target = True
+                        break
+                    if cmd in ('/help', '/?'):
+                        print("命令: /switch 更换对象, /quit 退出私聊")
+                        continue
+                    if message.startswith('/'):
+                        print("❌ 未知命令，可用: /switch /quit /help")
                         continue
 
                     if self.send_private_message(target_id, message):
-                        print(f"✅ 消息已发送给 {target_name}")
+                        print(f"  ✅ 已发送")
                     else:
-                        print("❌ 消息发送失败")
+                        print("  ❌ 发送失败")
+
+                if switch_target:
+                    continue
 
             except (ValueError, IndexError):
                 print("❌ 请输入有效数字")
