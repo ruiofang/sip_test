@@ -12,7 +12,8 @@
 - 客户端列表管理
 
 使用方法:
-python3 cloud_voip_client.py --server SERVER_IP [--name CLIENT_NAME]
+python3 cloud_voip_client.py [--server SERVER_IP] [--name CLIENT_NAME]
+未提供 --server 时，将尝试从 client_config.json 读取默认服务器。
 
 作者: RUIO
 日期: 2025年8月20日
@@ -61,6 +62,49 @@ def get_config_path(filename):
         base_path = os.path.dirname(__file__)
     
     return os.path.join(base_path, filename)
+
+
+def load_client_config(config_file='client_config.json'):
+    """加载客户端配置，失败时返回空配置。"""
+    config_path = get_config_path(config_file)
+
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as config_handle:
+                return json.load(config_handle)
+    except Exception as error:
+        print(f"⚠️ 加载客户端配置失败: {error}")
+
+    return {}
+
+
+def resolve_server_args(args):
+    """优先使用命令行参数，否则从客户端配置中解析服务器和默认名称。"""
+    config = load_client_config()
+    user_config = config.get('user', {})
+    servers = config.get('servers', {})
+
+    server_ip = args.server
+    port = args.port
+    client_name = args.name or user_config.get('default_name')
+
+    if server_ip:
+        return server_ip, port, client_name
+
+    last_server = user_config.get('last_server', 'default')
+    server_config = servers.get(last_server) or servers.get('default')
+
+    if not server_config:
+        raise ValueError('未提供 --server，且 client_config.json 中没有可用的服务器配置')
+
+    server_ip = server_config.get('ip')
+    port = server_config.get('port', port)
+
+    if not server_ip:
+        raise ValueError('client_config.json 中的服务器配置缺少 ip 字段')
+
+    print(f"ℹ️ 未提供 --server，使用配置服务器: {server_ip}:{port}")
+    return server_ip, port, client_name
 
 
 class CloudVoIPClient:
@@ -1677,12 +1721,17 @@ class CloudVoIPClient:
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='云VoIP客户端')
-    parser.add_argument('--server', required=True, help='服务器IP地址')
+    parser.add_argument('--server', help='服务器IP地址；未提供时从 client_config.json 读取默认服务器')
     parser.add_argument('--name', help='客户端名称')
     parser.add_argument('--port', type=int, default=5060, help='服务器端口 (默认: 5060)')
     parser.add_argument('--auto-reconnect', action='store_true', help='自动重连模式')
     
     args = parser.parse_args()
+
+    try:
+        server_ip, port, client_name = resolve_server_args(args)
+    except ValueError as error:
+        parser.error(str(error))
     
     if args.auto_reconnect:
         # 自动重连模式
@@ -1696,9 +1745,9 @@ def main():
                     time.sleep(2)
                 
                 client = CloudVoIPClient(
-                    server_ip=args.server,
-                    client_name=args.name,
-                    base_port=args.port
+                    server_ip=server_ip,
+                    client_name=client_name,
+                    base_port=port
                 )
                 
                 if client.connect():
@@ -1728,9 +1777,9 @@ def main():
     else:
         # 标准模式
         client = CloudVoIPClient(
-            server_ip=args.server,
-            client_name=args.name,
-            base_port=args.port
+            server_ip=server_ip,
+            client_name=client_name,
+            base_port=port
         )
         
         try:

@@ -87,6 +87,8 @@ class CloudVoIPServer:
         # 清理相关配置
         self.client_timeout = 60  # 客户端超时时间（秒）
         self.heartbeat_interval = 30  # 心跳检查间隔（秒）
+        self.message_idle_timeout = 1.0  # 消息连接空闲轮询超时（秒）
+        self.message_frame_timeout = 5.0  # 单个消息帧读取超时（秒）
         self.cleanup_thread = None
         
         # 日志配置
@@ -495,9 +497,12 @@ class CloudVoIPServer:
         """处理消息客户端"""
         client_id = None
         try:
+            client_sock.settimeout(self.message_idle_timeout)
             while self.running:
                 # 接收消息长度
-                length_data = client_sock.recv(4)
+                length_data = self.recv_exact(client_sock, 4, allow_idle_timeout=True)
+                if length_data is None:
+                    continue
                 if not length_data:
                     break
                 
@@ -507,14 +512,9 @@ class CloudVoIPServer:
                     break
                 
                 # 接收完整消息
-                data = b''
-                while len(data) < msg_length:
-                    chunk = client_sock.recv(min(msg_length - len(data), 4096))
-                    if not chunk:
-                        break
-                    data += chunk
-                
-                if len(data) != msg_length:
+                data = self.recv_exact(client_sock, msg_length, timeout=self.message_frame_timeout)
+                if not data:
+                    self.logger.warning(f"客户端 {client_id or addr} 发送了不完整的消息帧")
                     break
                 
                 # 解析消息
@@ -564,6 +564,35 @@ class CloudVoIPServer:
                 client_sock.close()
             except:
                 pass
+
+    def recv_exact(self, client_sock: socket.socket, size: int,
+                   timeout: Optional[float] = None,
+                   allow_idle_timeout: bool = False) -> Optional[bytes]:
+        """从TCP连接中精确读取指定字节数。"""
+        data = bytearray()
+        previous_timeout = client_sock.gettimeout()
+
+        if timeout is not None:
+            client_sock.settimeout(timeout)
+
+        try:
+            while len(data) < size:
+                try:
+                    chunk = client_sock.recv(size - len(data))
+                except socket.timeout:
+                    if allow_idle_timeout and not data:
+                        return None
+                    return b''
+
+                if not chunk:
+                    return b''
+
+                data.extend(chunk)
+
+            return bytes(data)
+        finally:
+            if timeout is not None:
+                client_sock.settimeout(previous_timeout)
 
     def handle_control_client(self, client_sock: socket.socket, addr: Tuple[str, int]):
         """处理控制客户端"""
@@ -944,7 +973,7 @@ class CloudVoIPServer:
             length = struct.pack('I', len(data))
             msg_type = message.get('type', 'unknown')
             self.logger.info(f"[DEBUG] 准备发送消息类型 {msg_type}，数据长度: {len(data)}")
-            client_sock.send(length + data)
+            client_sock.sendall(length + data)
             self.logger.info(f"[DEBUG] 消息 {msg_type} 发送成功")
         except Exception as e:
             self.logger.error(f"发送消息失败: {e}")

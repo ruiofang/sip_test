@@ -48,7 +48,7 @@
 ## 🔧 技术栈
 
 - **语言**: Python 3.10+
-- **音频处理**: PyAudio
+- **音频处理**: PyAudio（可选，用于语音采集与播放）
 - **网络协议**: TCP (消息控制) + UDP (音频传输)
 - **音频编码**: PCM 16-bit
 - **架构模式**: 客户端-服务器模式
@@ -70,8 +70,23 @@ python3 -m venv .venv
 source .venv/bin/activate  # Linux/Mac
 # 或 .venv\\Scripts\\activate  # Windows
 
-# 安装依赖
-pip install PyAudio
+# 安装基础依赖
+pip install -r requirements.txt
+```
+
+如需语音通话功能，还需要安装 PyAudio。
+
+Linux:
+
+```bash
+sudo apt install portaudio19-dev python3-dev
+pip install PyAudio==0.2.14
+```
+
+Windows:
+
+```bash
+pip install PyAudio==0.2.14
 ```
 
 ### 启动服务器
@@ -86,6 +101,12 @@ python3 cloud_voip_server.py --host 0.0.0.0 --port 5060
 ```bash
 # 连接到服务器
 python3 cloud_voip_client.py --server YOUR_SERVER_IP --name "你的名称"
+```
+
+如果 client_config.json 已配置默认服务器，也可以直接运行：
+
+```bash
+python3 cloud_voip_client.py
 ```
 
 ## 📋 使用指南
@@ -176,19 +197,28 @@ EXPOSE 5060 5061 5062
 CMD ["python3", "cloud_voip_server.py", "--host", "0.0.0.0"]
 ```
 
+如果容器中也需要启用语音采集或播放，请额外安装系统依赖和 PyAudio：
+
+```dockerfile
+RUN apt-get update && apt-get install -y portaudio19-dev python3-dev \
+   && pip install PyAudio==0.2.14
+```
+
 ## 🧪 测试工具
 
 项目包含多个测试工具帮助诊断问题：
 
-- `test_audio.py` - 音频功能专项测试
-- `debug_connection.py` - 连接诊断工具
-- `debug_server_state.py` - 服务器状态检查
-- `test_call.py` - 通话功能自动化测试
+- `tool/test_audio_processing.py` - 音频处理与啸叫抑制测试
+- `tool/test_config_loading.py` - 配置文件加载测试
+- `tool/audio_diagnostic.py` - 音频设备与处理链路诊断
+- `tool/audio_quick_fix.py` - 常见音频问题快速修复
 
 运行测试：
 ```bash
-python3 test_audio.py          # 测试音频传输
-python3 debug_connection.py    # 测试网络连接
+python3 tool/test_config_loading.py     # 测试配置读取
+python3 tool/test_audio_processing.py   # 测试音频处理
+python3 tool/audio_diagnostic.py        # 运行音频诊断
+python3 tool/audio_quick_fix.py         # 应用常见音频修复
 ```
 
 ## 🐛 故障排除
@@ -199,6 +229,7 @@ python3 debug_connection.py    # 测试网络连接
    - 检查麦克风和扬声器权限
    - 确认防火墙开放UDP端口5061
    - 检查ALSA音频配置
+   - 如果安装 PyAudio 失败，先安装 `portaudio19-dev` 和 `python3-dev`
 
 2. **连接失败**：
    - 确认服务器IP地址正确
@@ -212,14 +243,19 @@ python3 debug_connection.py    # 测试网络连接
 
 ### 调试模式
 
-启用调试日志：
+常用调试方式：
 ```bash
-# 服务器调试模式
-python3 cloud_voip_server.py --host 0.0.0.0 --debug
+# 服务端前台启动
+python3 cloud_voip_server.py --host 0.0.0.0 --port 5060
 
-# 客户端调试模式
-python3 cloud_voip_client.py --server SERVER_IP --name CLIENT_NAME --debug
+# 服务端后台运行，不进入交互控制台
+python3 cloud_voip_server.py --host 0.0.0.0 --port 5060 --daemon
+
+# 客户端自动重连
+python3 cloud_voip_client.py --server SERVER_IP --name CLIENT_NAME --auto-reconnect
 ```
+
+服务端运行日志默认写入 `cloud_voip_server.log`，客户端音频处理细节可通过 `audio_config.json` 中的 `debug_audio_processing` 开关启用。
 
 ## 📊 性能优化
 

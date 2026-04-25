@@ -1,9 +1,10 @@
-PyAudio==0.2.14
 numpy>=1.21.0
 # VoIP语音通话系统依赖包
 # numpy用于高级音频处理和啸叫抑制功能
+# PyAudio 为可选语音依赖；Linux 通常需先安装 portaudio19-dev 和 python3-dev 后再单独安装
 
 # 可选依赖（用于扩展功能）
+# PyAudio==0.2.14
 # requests>=2.25.1  # HTTP请求支持
 # flask>=2.0.0      # Web管理界面
 # websockets>=10.0  # WebSocket支持
