@@ -405,35 +405,41 @@ class CloudVoIPClient:
             
             data = json.dumps(message).encode('utf-8')
             length = struct.pack('I', len(data))
-            self.message_socket.send(length + data)
+            # 使用 sendall 避免短发送导致服务端接收不到完整包
+            self.message_socket.sendall(length + data)
             return True
             
         except Exception as e:
             print(f"发送消息失败: {e}")
             return False
 
+    def _recv_exact(self, size: int) -> Optional[bytes]:
+        """从消息 socket 精确读取 size 字节，连接断开返回 None。"""
+        data = bytearray()
+        while len(data) < size:
+            chunk = self.message_socket.recv(size - len(data))
+            if not chunk:
+                return None
+            data.extend(chunk)
+        return bytes(data)
+
     def message_receive_thread(self):
         """消息接收线程"""
         while self.running and self.connected:
             try:
-                # 接收消息长度
-                length_data = self.message_socket.recv(4)
+                # 精确接收 4 字节长度，避免半包导致 struct.unpack 异常
+                length_data = self._recv_exact(4)
                 if not length_data:
                     break
                 
                 msg_length = struct.unpack('I', length_data)[0]
-                if msg_length > 1024 * 1024:  # 1MB限制
+                if msg_length == 0 or msg_length > 1024 * 1024:  # 1MB限制
+                    print(f"⚠️ 收到异常消息长度: {msg_length}")
                     break
                 
-                # 接收完整消息
-                data = b''
-                while len(data) < msg_length:
-                    chunk = self.message_socket.recv(min(msg_length - len(data), 4096))
-                    if not chunk:
-                        break
-                    data += chunk
-                
-                if len(data) != msg_length:
+                # 精确接收完整消息
+                data = self._recv_exact(msg_length)
+                if data is None:
                     break
                 
                 # 解析并处理消息
@@ -441,7 +447,7 @@ class CloudVoIPClient:
                     message = json.loads(data.decode('utf-8'))
                     self.handle_server_message(message)
                 except json.JSONDecodeError as e:
-                    pass
+                    print(f"⚠️ 解析服务器消息失败: {e}")
                     
             except Exception as e:
                 if self.running:
@@ -470,10 +476,19 @@ class CloudVoIPClient:
         elif msg_type == 'client_list':
             self.handle_client_list(message)
         elif msg_type == 'heartbeat':
-            # 心跳消息，静默处理
-            pass
+            self.handle_heartbeat(message)
         else:
             print(f"收到未知消息类型: {msg_type}")
+
+    def handle_heartbeat(self, message: Dict[str, Any]):
+        """响应服务器心跳，避免被服务端误判为超时断开。"""
+        response = {
+            'type': 'heartbeat_response',
+            'timestamp': time.time(),
+            'server_time': message.get('server_time'),
+            'original_timestamp': message.get('timestamp')
+        }
+        self.send_message(response)
 
     def handle_register_response(self, message: Dict[str, Any]):
         """处理注册响应"""
@@ -493,7 +508,6 @@ class CloudVoIPClient:
         
         time_str = time.strftime("%H:%M:%S", time.localtime(timestamp))
         print(f"\n📢 [广播] {sender} ({time_str}): {content}")
-        print(f"{self.client_name}> ", end="", flush=True)
 
     def handle_private_message(self, message: Dict[str, Any]):
         """处理私聊消息"""
@@ -503,7 +517,6 @@ class CloudVoIPClient:
         
         time_str = time.strftime("%H:%M:%S", time.localtime(timestamp))
         print(f"\n💬 [私聊] {sender} ({time_str}): {content}")
-        print(f"{self.client_name}> ", end="", flush=True)
 
     def handle_call_request(self, message: Dict[str, Any]):
         """处理通话请求"""
@@ -532,7 +545,6 @@ class CloudVoIPClient:
         
         if accepted:
             print(f"✅ {responder} 接受了您的通话请求")
-            print(f"{self.client_name}> ", end="", flush=True)
             with self.call_lock:
                 self.current_call = {
                     'id': call_id,
@@ -542,7 +554,6 @@ class CloudVoIPClient:
             self.start_audio_streams()
         else:
             print(f"❌ {responder} 拒绝了您的通话请求")
-            print(f"{self.client_name}> ", end="", flush=True)
 
     def handle_call_hangup(self, message: Dict[str, Any]):
         """处理挂断通话"""
@@ -550,7 +561,6 @@ class CloudVoIPClient:
         peer = message.get('from')
         
         print(f"📞 {peer} 挂断了通话")
-        print(f"{self.client_name}> ", end="", flush=True)
         
         with self.call_lock:
             self.current_call = None
@@ -588,12 +598,9 @@ class CloudVoIPClient:
                 client_id = client['id']
                 if client_id != self.client_id:  # 排除自己
                     self.online_clients[client_id] = client
-                    print(f"  - 发现客户端: {client.get('name', client_id)} ({client_id})")
         
         # 设置事件，通知show_clients函数
         self.client_list_event.set()
-        print(f"✅ 客户端列表更新完成")
-        print(f"{self.client_name}> ", end="", flush=True)
 
     def request_client_list(self):
         """请求客户端列表"""
@@ -1314,104 +1321,67 @@ class CloudVoIPClient:
         print("\n" + "=" * 60)
         print("云VoIP客户端控制台")
         print("=" * 60)
-        print("可用命令:")
-        print("  clients                    - 显示在线客户端")
-        print("  call                       - 发起通话 (交互选择)")
-        print("  hangup                     - 挂断通话 (交互确认)")
-        print("  broadcast                  - 发送广播消息 (交互输入)")
-        print("  private                    - 发送私聊消息 (交互选择)")
-        print("  status                     - 显示客户端状态")
-        print("  audio                      - 音频设置")
-        print("  quit                       - 退出客户端")
-        print("  help                       - 显示帮助")
         print("🤖 提示: 已开启自动接听模式，来电将自动接受")
         print("=" * 60)
         
         while self.running and self.connected:
             try:
-                cmd_line = input(f"{self.client_name}> ").strip()
-                if not cmd_line:
-                    continue
-                
-                parts = cmd_line.split(' ')
-                cmd = parts[0].lower()
-                
-                if cmd == 'quit':
+                self.show_main_menu()
+                choice = input("请选择功能 (0-7): ").strip()
+
+                if choice == '0':
                     print("正在退出...")
-                    self.running = False  # 设置为False表示用户主动退出
+                    self.running = False
                     break
-                elif cmd == 'clients':
+                elif choice == '1':
                     self.show_clients()
-                elif cmd == 'call':
-                    if len(parts) > 1:
-                        # 兼容旧的直接指定ID的方式
-                        target_id = parts[1]
-                        self.make_call(target_id)
-                    else:
-                        # 新的选择式方式
-                        self.interactive_call()
-                elif cmd == 'hangup':
+                elif choice == '2':
+                    self.interactive_call()
+                elif choice == '3':
                     self.interactive_hangup()
-                elif cmd == 'accept' and len(parts) > 1:
-                    call_id = parts[1]
-                    self.accept_call(call_id)
-                elif cmd == 'reject' and len(parts) > 1:
-                    call_id = parts[1]
-                    self.reject_call(call_id)
-                elif cmd == 'broadcast':
-                    if len(parts) > 1:
-                        # 兼容旧的直接输入消息的方式
-                        message = ' '.join(parts[1:])
-                        if self.send_broadcast(message):
-                            print("广播消息已发送")
-                    else:
-                        # 新的选择式方式
-                        self.interactive_broadcast()
-                elif cmd == 'private':
-                    if len(parts) > 2:
-                        # 兼容旧的直接指定ID和消息的方式
-                        target_id = parts[1]
-                        message = ' '.join(parts[2:])
-                        if self.send_private_message(target_id, message):
-                            print(f"私聊消息已发送给 {target_id}")
-                    else:
-                        # 新的选择式方式
-                        self.interactive_private_message()
-                elif cmd == 'status':
-                    call_status = "无通话"
-                    if self.current_call:
-                        call_status = f"与 {self.current_call['peer']} 通话中"
-                    
-                    print(f"\n客户端状态:")
-                    print(f"  ID: {self.client_id}")
-                    print(f"  名称: {self.client_name}")
-                    print(f"  服务器: {self.server_ip}:{self.message_port}")
-                    print(f"  连接状态: {'已连接' if self.connected else '未连接'}")
-                    print(f"  通话状态: {call_status}")
-                    print(f"  在线客户端数量: {len(self.online_clients)}")
-                elif cmd == 'audio':
+                elif choice == '4':
+                    self.interactive_broadcast()
+                elif choice == '5':
+                    self.interactive_private_message()
+                elif choice == '6':
+                    self.show_status()
+                elif choice == '7':
                     self.audio_settings_menu()
-                elif cmd == 'help':
-                    print("\n可用命令:")
-                    print("  clients                    - 显示在线客户端")
-                    print("  call                       - 发起通话 (交互选择)")
-                    print("  hangup                     - 挂断通话 (交互确认)")
-                    print("  broadcast                  - 发送广播消息 (交互输入)")
-                    print("  private                    - 发送私聊消息 (交互选择)")
-                    print("  status                     - 显示客户端状态")
-                    print("  audio                      - 音频设置")
-                    print("  quit                       - 退出客户端")
-                    print("  help                       - 显示帮助")
-                    print("\n🤖 提示: 已开启自动接听模式，来电将自动接受！")
                 else:
-                    print(f"未知命令: {cmd}. 输入 'help' 查看可用命令")
+                    print("❌ 无效选择，请输入 0-7")
                     
             except KeyboardInterrupt:
                 print("\n收到中断信号，正在退出...")
-                self.running = False  # 用户按Ctrl+C也算主动退出
+                self.running = False
                 break
             except EOFError:
                 break
+
+    def show_main_menu(self):
+        """显示主菜单。"""
+        print("\n功能菜单:")
+        print("  1. 查看在线客户端")
+        print("  2. 发起通话")
+        print("  3. 挂断通话")
+        print("  4. 发送广播消息")
+        print("  5. 发送私聊消息")
+        print("  6. 查看当前状态")
+        print("  7. 音频设置")
+        print("  0. 退出客户端")
+
+    def show_status(self):
+        """显示客户端状态。"""
+        call_status = "无通话"
+        if self.current_call:
+            call_status = f"与 {self.current_call['peer']} 通话中"
+
+        print(f"\n客户端状态:")
+        print(f"  ID: {self.client_id}")
+        print(f"  名称: {self.client_name}")
+        print(f"  服务器: {self.server_ip}:{self.message_port}")
+        print(f"  连接状态: {'已连接' if self.connected else '未连接'}")
+        print(f"  通话状态: {call_status}")
+        print(f"  在线客户端数量: {len(self.online_clients)}")
 
     def interactive_call(self):
         """交互式发起通话"""
@@ -1494,52 +1464,72 @@ class CloudVoIPClient:
         """交互式发送私聊消息"""
         print("\n💬 发送私聊消息")
         print("-" * 40)
-        
-        # 获取最新的客户端列表
-        self.request_client_list()
-        # 等待客户端列表更新
-        if self.client_list_event.wait(timeout=3):
-            self.client_list_event.clear()
-        
-        with self.clients_lock:
-            if not self.online_clients:
-                print("❌ 没有其他在线客户端")
-                return
-            
-            print("选择私聊对象:")
-            clients_list = list(self.online_clients.items())
-            for i, (client_id, client_info) in enumerate(clients_list, 1):
-                client_name = client_info.get('name', client_id)
-                print(f"  {i}. {client_name} ({client_id})")
-            print(f"  0. 取消")
-            
+
+        while True:
+            # 获取最新的客户端列表
+            self.request_client_list()
+            if self.client_list_event.wait(timeout=3):
+                self.client_list_event.clear()
+
+            with self.clients_lock:
+                if not self.online_clients:
+                    print("❌ 没有其他在线客户端")
+                    return
+
+                print("选择私聊对象:")
+                clients_list = list(self.online_clients.items())
+                for i, (client_id, client_info) in enumerate(clients_list, 1):
+                    client_name = client_info.get('name', client_id)
+                    print(f"  {i}. {client_name} ({client_id})")
+                print("  0. 返回主菜单")
+
             try:
                 choice = input("\n请选择 (0-{}): ".format(len(clients_list))).strip()
                 if not choice or choice == '0':
-                    print("已取消发送")
+                    print("已退出私聊")
                     return
-                
+
                 choice_num = int(choice)
-                if 1 <= choice_num <= len(clients_list):
-                    target_id = clients_list[choice_num - 1][0]
-                    target_name = clients_list[choice_num - 1][1].get('name', target_id)
-                    
-                    # 输入消息内容
-                    message = input(f"\n请输入要发送给 {target_name} 的消息: ").strip()
-                    if message:
-                        if self.send_private_message(target_id, message):
-                            print(f"✅ 消息已发送给 {target_name}")
-                        else:
-                            print("❌ 消息发送失败")
-                    else:
-                        print("❌ 消息不能为空")
-                else:
+                if not 1 <= choice_num <= len(clients_list):
                     print("❌ 无效选择")
-                    
+                    continue
+
+                target_id = clients_list[choice_num - 1][0]
+                target_name = clients_list[choice_num - 1][1].get('name', target_id)
+
+                print(f"\n已进入与 {target_name} 的私聊。")
+
+                while True:
+                    print(f"\n私聊对象: {target_name}")
+                    print("  1. 发送消息")
+                    print("  2. 更换私聊对象")
+                    print("  0. 退出私聊")
+                    action = input("请选择操作 (0-2): ").strip()
+
+                    if action == '0':
+                        print("已退出私聊")
+                        return
+                    if action == '2':
+                        break
+                    if action != '1':
+                        print("❌ 无效选择")
+                        continue
+
+                    message = input(f"请输入要发送给 {target_name} 的消息: ").strip()
+                    if not message:
+                        print("❌ 消息不能为空")
+                        continue
+
+                    if self.send_private_message(target_id, message):
+                        print(f"✅ 消息已发送给 {target_name}")
+                    else:
+                        print("❌ 消息发送失败")
+
             except (ValueError, IndexError):
                 print("❌ 请输入有效数字")
             except KeyboardInterrupt:
-                print("\n已取消发送")
+                print("\n已退出私聊")
+                return
 
     def audio_settings_menu(self):
         """音频设置菜单"""

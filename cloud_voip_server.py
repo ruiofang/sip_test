@@ -465,22 +465,23 @@ class CloudVoIPServer:
         self.logger.info("音频中转线程启动")
         while self.running:
             try:
-                data, addr = self.audio_socket.recvfrom(4096)
-                self.logger.debug(f"收到音频数据包: {len(data)} 字节 from {addr}")
+                # 缓冲大小放宽到 8192，避免 chunk 调大后出现截断
+                data, addr = self.audio_socket.recvfrom(8192)
                 
                 # 解析音频数据包头部（新格式：16字节源ID + 16字节目标ID + 音频数据）
                 if len(data) > 32:
                     # 解析包头
-                    source_id = data[:16].rstrip(b'\x00').decode('utf-8')
-                    target_id = data[16:32].rstrip(b'\x00').decode('utf-8')
+                    try:
+                        source_id = data[:16].rstrip(b'\x00').decode('utf-8')
+                        target_id = data[16:32].rstrip(b'\x00').decode('utf-8')
+                    except UnicodeDecodeError:
+                        self.logger.warning(f"音频包包头解码失败，丢弃 {len(data)} 字节")
+                        continue
                     audio_data = data[32:]
                     
                     # 更新源客户端的实际音频地址
                     if source_id:
                         self.client_audio_addrs[source_id] = addr
-                        self.logger.debug(f"更新客户端 {source_id} 音频地址为: {addr}")
-                    
-                    self.logger.debug(f"音频转发: {source_id} -> {target_id}, 数据长度: {len(audio_data)}")
                     
                     # 转发音频数据
                     self.forward_audio(source_id, target_id, audio_data, addr)
@@ -492,6 +493,8 @@ class CloudVoIPServer:
             except Exception as e:
                 if self.running:
                     self.logger.error(f"音频中转线程错误: {e}")
+                    # 防止异常分支热循环占满 CPU
+                    time.sleep(0.05)
 
     def handle_message_client(self, client_sock: socket.socket, addr: Tuple[str, int]):
         """处理消息客户端"""
